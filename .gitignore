@@ -1,0 +1,4 @@
+.gocache/
+/icloud
+/dist/
+*.test
