@@ -85,6 +85,26 @@ func (c *IMAPClient) ListFolders() ([]Folder, error) {
 	return folders, nil
 }
 
+func (c *IMAPClient) AppendMessage(folder string, flags []string, date time.Time, msg []byte) error {
+	if strings.TrimSpace(folder) == "" {
+		return output.Validation("missing_folder", "folder is required", nil)
+	}
+	flagsPart := ""
+	if len(flags) > 0 {
+		flagsPart = " (" + strings.Join(flags, " ") + ")"
+	}
+	datePart := ""
+	if !date.IsZero() {
+		datePart = " " + quote(date.Format("02-Jan-2006 15:04:05 -0700"))
+	}
+	msg = ensureCRLF(msg)
+	_, err := c.commandLiteral("APPEND %s%s%s {%d}", msg, quote(folder), flagsPart, datePart, len(msg))
+	if err != nil {
+		return output.Remote("imap_append_failed", "failed to append mail message", err.Error())
+	}
+	return nil
+}
+
 func (c *IMAPClient) CreateFolder(name string) error {
 	if strings.TrimSpace(name) == "" {
 		return output.Validation("missing_folder_name", "folder name is required", nil)
@@ -318,6 +338,47 @@ func (c *IMAPClient) command(format string, args ...any) (imapResponse, error) {
 	return resp, nil
 }
 
+func (c *IMAPClient) commandLiteral(format string, literal []byte, args ...any) (imapResponse, error) {
+	c.tag++
+	tag := fmt.Sprintf("A%04d", c.tag)
+	line := fmt.Sprintf(format, args...)
+	if _, err := fmt.Fprintf(c.w, "%s %s\r\n", tag, line); err != nil {
+		return imapResponse{}, err
+	}
+	if err := c.w.Flush(); err != nil {
+		return imapResponse{}, err
+	}
+	continuation, err := c.r.ReadString('\n')
+	if err != nil {
+		return imapResponse{}, err
+	}
+	continuation = strings.TrimRight(continuation, "\r\n")
+	if !strings.HasPrefix(continuation, "+") {
+		return imapResponse{Lines: []string{continuation}}, fmt.Errorf("%s", continuation)
+	}
+	if _, err := c.w.Write(literal); err != nil {
+		return imapResponse{}, err
+	}
+	if _, err := c.w.WriteString("\r\n"); err != nil {
+		return imapResponse{}, err
+	}
+	if err := c.w.Flush(); err != nil {
+		return imapResponse{}, err
+	}
+	resp, err := c.readUntilTag(tag)
+	if err != nil {
+		return resp, err
+	}
+	if len(resp.Lines) == 0 {
+		return resp, fmt.Errorf("empty IMAP response")
+	}
+	last := resp.Lines[len(resp.Lines)-1]
+	if !strings.HasPrefix(last, tag+" OK") {
+		return resp, fmt.Errorf("%s", last)
+	}
+	return resp, nil
+}
+
 func (c *IMAPClient) readUntilTag(tag string) (imapResponse, error) {
 	resp := imapResponse{}
 	for {
@@ -504,6 +565,15 @@ func defaultFolder(folder string) string {
 	return folder
 }
 
+func ensureCRLF(msg []byte) []byte {
+	if bytes.HasSuffix(msg, []byte("\r\n")) {
+		return msg
+	}
+	out := append([]byte{}, msg...)
+	out = append(out, '\r', '\n')
+	return out
+}
+
 func shouldDiscoverTrashFolder(folder string) bool {
 	folder = strings.TrimSpace(folder)
 	return folder == "" || strings.EqualFold(folder, DefaultTrash)
@@ -530,6 +600,26 @@ func chooseTrashFolder(folders []Folder, requested string) string {
 		return requested
 	}
 	return DefaultTrash
+}
+
+func chooseSentFolder(folders []Folder, requested string) string {
+	if strings.TrimSpace(requested) != "" {
+		return requested
+	}
+	for _, folder := range folders {
+		for _, flag := range folder.Flags {
+			if strings.EqualFold(flag, `\Sent`) {
+				return folder.Name
+			}
+		}
+	}
+	for _, folder := range folders {
+		name := strings.ToLower(folder.Name)
+		if name == "sent" || name == "sent messages" || strings.Contains(name, "sent") {
+			return folder.Name
+		}
+	}
+	return "Sent"
 }
 
 func redactIMAPError(s string) string {

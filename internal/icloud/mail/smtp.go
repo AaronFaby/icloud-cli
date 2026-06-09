@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -38,7 +39,35 @@ func Send(cfg config.Config, req SendRequest) (map[string]any, error) {
 	if err := sendMailTLS(DefaultSMTPHost, cfg.AppleID, cfg.AppPassword, req.From, recipients, msg); err != nil {
 		return nil, output.Remote("smtp_send_failed", "failed to send iCloud mail", err.Error())
 	}
-	return map[string]any{"from": req.From, "to": req.To, "cc": req.CC, "bcc_count": len(req.BCC), "subject": req.Subject}, nil
+	return map[string]any{
+		"from":      req.From,
+		"to":        req.To,
+		"cc":        req.CC,
+		"bcc_count": len(req.BCC),
+		"subject":   req.Subject,
+		"sent_copy": appendSentCopy(cfg, msg),
+	}, nil
+}
+
+func appendSentCopy(cfg config.Config, msg []byte) map[string]any {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	client, err := DialIMAP(ctx, cfg)
+	if err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	defer client.Close()
+
+	folders, err := client.ListFolders()
+	if err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	folder := chooseSentFolder(folders, "")
+	if err := client.AppendMessage(folder, []string{`\Seen`}, time.Now(), msg); err != nil {
+		return map[string]any{"ok": false, "folder": folder, "error": err.Error()}
+	}
+	return map[string]any{"ok": true, "folder": folder}
 }
 
 func sendMailTLS(addr string, username string, password string, from string, to []string, msg []byte) error {
