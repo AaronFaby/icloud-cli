@@ -97,3 +97,70 @@ func TestBuildCalendarDataRequiresStructuredFields(t *testing.T) {
 		t.Fatal("expected missing time error")
 	}
 }
+
+func TestBuildVCardFromStructuredInput(t *testing.T) {
+	got, err := buildVCard(contactInput{
+		ID:            "ada-1",
+		GivenName:     "Ada",
+		FamilyName:    "Lovelace",
+		FormattedName: "Ada, Countess; Lovelace",
+		Emails:        []string{"ada@example.com", "", "work@example.com"},
+		Phones:        []string{"+1 555 0100"},
+		Organization:  "Analytical Engines, Inc.; Research",
+		Note:          "line 1\nline 2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"BEGIN:VCARD\r\n",
+		"VERSION:3.0\r\n",
+		"UID:ada-1\r\n",
+		"N:Lovelace;Ada;;;\r\n",
+		"FN:Ada\\, Countess\\; Lovelace\r\n",
+		"EMAIL;TYPE=INTERNET:ada@example.com\r\n",
+		"EMAIL;TYPE=INTERNET:work@example.com\r\n",
+		"TEL:+1 555 0100\r\n",
+		"ORG:Analytical Engines\\, Inc.\\; Research\r\n",
+		"NOTE:line 1\\nline 2\r\n",
+		"END:VCARD\r\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("vcard missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "EMAIL;TYPE=INTERNET:\r\n") {
+		t.Fatalf("vcard included empty email:\n%s", got)
+	}
+}
+
+func TestBuildVCardUsesNameFallback(t *testing.T) {
+	got, err := buildVCard(contactInput{
+		UID:        "grace-1",
+		GivenName:  "Grace",
+		FamilyName: "Hopper",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "UID:grace-1\r\n") || !strings.Contains(got, "FN:Grace Hopper\r\n") {
+		t.Fatalf("vcard = %s", got)
+	}
+}
+
+func TestBuildVCardNormalizesRawVCard(t *testing.T) {
+	got, err := buildVCard(contactInput{VCard: "BEGIN:VCARD\nVERSION:3.0\nUID:x\nFN:Ada\nEND:VCARD\n\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:x\r\nFN:Ada\r\nEND:VCARD\r\n"
+	if got != want {
+		t.Fatalf("vcard = %q, want %q", got, want)
+	}
+}
+
+func TestBuildVCardRequiresName(t *testing.T) {
+	if _, err := buildVCard(contactInput{Emails: []string{"ada@example.com"}}); err == nil {
+		t.Fatal("expected missing contact name error")
+	}
+}
