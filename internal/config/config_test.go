@@ -28,6 +28,8 @@ func TestLoadPrefersEnvOverConfig(t *testing.T) {
 }
 
 func TestRequireCredentialsReportsMissing(t *testing.T) {
+	t.Setenv(EnvAppleID, "")
+	t.Setenv(EnvAppPassword, "")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "missing.json")
 	_, _, err := RequireCredentials(path)
@@ -37,6 +39,8 @@ func TestRequireCredentialsReportsMissing(t *testing.T) {
 }
 
 func TestSaveWritesConfig(t *testing.T) {
+	t.Setenv(EnvAppleID, "")
+	t.Setenv(EnvAppPassword, "")
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 	saved, err := Save(SaveOptions{Path: path, AppleID: "me@example.com", AppPassword: "pass"})
 	if err != nil {
