@@ -11,6 +11,16 @@ V1 supports:
 
 The CLI is JSON-first and noninteractive. Missing credentials, validation errors, unsupported services, and remote failures all return structured JSON plus stable exit codes.
 
+## Status
+
+`v1.0.0` covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The v1.0 surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
+
+Release builds are produced for:
+
+- Linux amd64
+- Linux arm64
+- macOS arm64
+
 ## Credentials
 
 Environment variables are preferred for containers and agents:
@@ -69,6 +79,8 @@ icloud mail messages send --input-json '{
 }'
 ```
 
+Successful sends are accepted by SMTP and then copied to the detected Sent mailbox over IMAP. If SMTP succeeds but saving the sent copy fails, the command reports `sent_copy.ok=false` instead of retrying the send.
+
 Move a message:
 
 ```sh
@@ -89,6 +101,8 @@ Delete moves to Trash by default:
 ```sh
 icloud mail messages delete --folder INBOX --id 123
 ```
+
+The CLI detects the server's `\Trash` mailbox when available, which handles iCloud folders such as `Deleted Messages`.
 
 Permanent delete is explicit:
 
@@ -127,6 +141,8 @@ icloud calendar events update --calendar /123/calendars/work/ --id event-2026061
 icloud calendar events delete --calendar /123/calendars/work/ --id event-20260610T170000Z
 ```
 
+Event IDs may be bare resource IDs such as `event-20260610T170000Z`, full `.ics` names, absolute hrefs returned by `events list`, or full resource URLs.
+
 Contacts CRUD:
 
 ```sh
@@ -140,6 +156,28 @@ icloud contacts contacts create --book /123/carddavhome/card/ --input-json '{
 }'
 icloud contacts contacts delete --book /123/carddavhome/card/ --id contact-20260608T120000Z
 ```
+
+Use the address book entry from `contacts books list` whose `resource_types` includes `addressbook`; iCloud may also return collection roots that are not writable address books. Contact IDs may be bare IDs, `.vcf` names, hrefs returned by `contacts list`, or full resource URLs.
+
+## Testing
+
+Run the full test suite with workspace-local Go caches:
+
+```sh
+GOCACHE="$PWD/.gocache" GOMODCACHE="$PWD/.gomodcache" go test ./...
+```
+
+Build a local binary:
+
+```sh
+GOCACHE="$PWD/.gocache" GOMODCACHE="$PWD/.gomodcache" go build -o /private/tmp/icloud-cli ./cmd/icloud
+```
+
+For live smoke tests, use disposable records and clean them up:
+
+- Mail: send to yourself, verify Sent copy, flag/read-state changes, then delete test mail.
+- Calendar: create a temporary event, list it, update it, delete it, verify it is gone.
+- Contacts: create a temporary contact in the writable address book, get it, update it, delete it, verify it returns 404.
 
 ## Unsupported Services
 

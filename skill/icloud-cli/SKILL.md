@@ -37,8 +37,8 @@ Use `icloud auth check` to require credentials and `icloud auth doctor` for reda
 In this workspace, keep Go's build cache inside the repo:
 
 ```sh
-GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache go test ./...
-GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache go build -o /private/tmp/icloud-cli ./cmd/icloud
+GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test ./...
+GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go build -o /private/tmp/icloud-cli ./cmd/icloud
 ```
 
 For local smoke checks that do not contact iCloud:
@@ -73,12 +73,20 @@ icloud mail messages delete --folder INBOX --id 123
 icloud mail batch flag --input-json '{"folder":"INBOX","ids":["123","124"]}'
 ```
 
+Mail behavior notes:
+
+- Send uses SMTP and saves a copy to the detected Sent mailbox over IMAP.
+- Delete moves to the detected `\Trash` mailbox by default; permanent delete requires `--permanent`.
+- `messages get` includes parsed IMAP flags when the server returns them.
+
 Calendar:
 
 ```sh
 icloud calendar calendars list
 icloud calendar events list --calendar /calendar/href/ --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
 icloud calendar events create --calendar /calendar/href/ --input-json '{"summary":"Planning","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
+icloud calendar events update --calendar /calendar/href/ --id /calendar/href/event.ics --input-json '{"summary":"Planning updated","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
+icloud calendar events delete --calendar /calendar/href/ --id /calendar/href/event.ics
 ```
 
 Contacts:
@@ -87,10 +95,16 @@ Contacts:
 icloud contacts books list
 icloud contacts contacts list --book /addressbook/href/
 icloud contacts contacts create --book /addressbook/href/ --input-json '{"formatted_name":"Ada Lovelace","emails":["ada@example.com"]}'
+icloud contacts contacts get --book /addressbook/href/ --id contact.vcf
+icloud contacts contacts update --book /addressbook/href/ --id /addressbook/href/contact.vcf --input-json '{"formatted_name":"Ada Lovelace","emails":["ada@example.com"]}'
+icloud contacts contacts delete --book /addressbook/href/ --id /addressbook/href/contact.vcf
 ```
+
+For Contacts, choose the `contacts books list` entry whose `resource_types` includes `addressbook`. Do not use collection roots as writable books.
 
 ## Safety Defaults
 
 - `mail messages delete` moves to Trash by default.
 - Permanent mail deletion requires `--permanent`; use `--dry-run` before destructive automation.
+- For live smoke tests, create disposable records, verify create/read/update/delete, then verify cleanup.
 - Unsupported services such as iCloud Drive, Notes, Reminders, and Photos should return structured unsupported-service JSON until a private-API strategy is explicitly chosen.
