@@ -1,4 +1,5 @@
 .gocache/
+.gomodcache/
 /icloud
 /dist/
 *.test

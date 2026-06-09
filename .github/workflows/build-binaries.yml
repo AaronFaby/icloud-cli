@@ -1,0 +1,73 @@
+name: Build binaries
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact: icloud-linux-amd64
+          - goos: linux
+            goarch: arm64
+            artifact: icloud-linux-arm64
+          - goos: darwin
+            goarch: arm64
+            artifact: icloud-darwin-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o "dist/${{ matrix.artifact }}" \
+            ./cmd/icloud
+
+      - name: Package artifact
+        run: |
+          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
+          sha256sum "dist/${{ matrix.artifact }}.tar.gz" > "dist/${{ matrix.artifact }}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.tar.gz.sha256
+          if-no-files-found: error
