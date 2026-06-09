@@ -84,7 +84,7 @@ func (c *Client) PutEvent(ctx context.Context, calendarHref, id, calendarData st
 	if !strings.HasSuffix(id, ".ics") {
 		id += ".ics"
 	}
-	return c.put(ctx, c.childURL(calendarHref, id), "text/calendar; charset=utf-8", calendarData)
+	return c.put(ctx, c.eventURL(calendarHref, id), "text/calendar; charset=utf-8", calendarData)
 }
 
 func (c *Client) DeleteEvent(ctx context.Context, calendarHref, id string) error {
@@ -110,7 +110,7 @@ func (c *Client) PutContact(ctx context.Context, bookHref, id, vcard string) (Re
 	if !strings.HasSuffix(id, ".vcf") {
 		id += ".vcf"
 	}
-	return c.put(ctx, c.childURL(bookHref, id), "text/vcard; charset=utf-8", vcard)
+	return c.put(ctx, c.contactURL(bookHref, id), "text/vcard; charset=utf-8", vcard)
 }
 
 func (c *Client) DeleteContact(ctx context.Context, bookHref, id string) error {
@@ -437,7 +437,7 @@ func addressBookBody() string {
 func calendarQueryBody(from, to string) string {
 	timeRange := ""
 	if from != "" || to != "" {
-		timeRange = `<C:time-range start="` + compactCalTime(from) + `" end="` + compactCalTime(to) + `"/>`
+		timeRange = `<C:time-range start="` + escapeXMLAttr(compactCalTime(from)) + `" end="` + escapeXMLAttr(compactCalTime(to)) + `"/>`
 	}
 	return `<?xml version="1.0" encoding="utf-8"?>
 <C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
@@ -472,6 +472,12 @@ func compactCalTime(s string) string {
 		return t.UTC().Format("20060102T150405Z")
 	}
 	return strings.NewReplacer("-", "", ":", "", ".", "").Replace(s)
+}
+
+func escapeXMLAttr(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
 }
 
 func eventUID(calendarData string) string {
