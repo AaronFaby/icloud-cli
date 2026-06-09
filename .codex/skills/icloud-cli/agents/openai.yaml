@@ -1,0 +1,6 @@
+interface:
+  display_name: "iCloud CLI"
+  short_description: "Operate the JSON-first Go iCloud CLI"
+  default_prompt: "Use $icloud-cli to inspect credentials, run safe JSON iCloud CLI commands, and validate changes."
+policy:
+  allow_implicit_invocation: true
