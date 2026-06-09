@@ -5,7 +5,7 @@ description: Use when an agent needs to build, test, configure, or operate this 
 
 # iCloud CLI
 
-Use this skill when working with this repo's `icloud` Go CLI.
+Use this skill when working with this repository's `icloud` Go CLI.
 
 ## Core Rules
 
