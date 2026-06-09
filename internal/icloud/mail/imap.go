@@ -239,6 +239,12 @@ func (c *IMAPClient) Delete(folder, id, trashFolder string, permanent bool, dryR
 		return MutationResult{ID: id, OK: true, Warning: "dry_run:" + mode}, nil
 	}
 	if !permanent {
+		if shouldDiscoverTrashFolder(trashFolder) {
+			folders, err := c.ListFolders()
+			if err == nil {
+				trashFolder = chooseTrashFolder(folders, trashFolder)
+			}
+		}
 		if strings.TrimSpace(trashFolder) == "" {
 			trashFolder = DefaultTrash
 		}
@@ -496,6 +502,34 @@ func defaultFolder(folder string) string {
 		return "INBOX"
 	}
 	return folder
+}
+
+func shouldDiscoverTrashFolder(folder string) bool {
+	folder = strings.TrimSpace(folder)
+	return folder == "" || strings.EqualFold(folder, DefaultTrash)
+}
+
+func chooseTrashFolder(folders []Folder, requested string) string {
+	if !shouldDiscoverTrashFolder(requested) {
+		return requested
+	}
+	for _, folder := range folders {
+		for _, flag := range folder.Flags {
+			if strings.EqualFold(flag, `\Trash`) {
+				return folder.Name
+			}
+		}
+	}
+	for _, folder := range folders {
+		name := strings.ToLower(folder.Name)
+		if name == "trash" || name == "deleted messages" || strings.Contains(name, "trash") {
+			return folder.Name
+		}
+	}
+	if strings.TrimSpace(requested) != "" {
+		return requested
+	}
+	return DefaultTrash
 }
 
 func redactIMAPError(s string) string {
