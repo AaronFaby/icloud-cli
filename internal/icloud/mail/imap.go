@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/aaronfaby/icloud-cli/internal/config"
 	"github.com/aaronfaby/icloud-cli/internal/output"
@@ -424,9 +426,9 @@ func parseFolder(line string) Folder {
 	f := Folder{Flags: flags}
 	if len(quoted) >= 2 {
 		f.Delimiter = quoted[len(quoted)-2]
-		f.Name = quoted[len(quoted)-1]
+		f.Name = decodeModifiedUTF7(quoted[len(quoted)-1])
 	} else if len(quoted) == 1 {
-		f.Name = quoted[0]
+		f.Name = decodeModifiedUTF7(quoted[0])
 	}
 	return f
 }
@@ -526,6 +528,52 @@ func quotedValues(line string) []string {
 		}
 	}
 	return values
+}
+
+func decodeModifiedUTF7(s string) string {
+	if !strings.Contains(s, "&") {
+		return s
+	}
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '&' {
+			out.WriteByte(s[i])
+			i++
+			continue
+		}
+		end := strings.IndexByte(s[i+1:], '-')
+		if end < 0 {
+			out.WriteByte(s[i])
+			i++
+			continue
+		}
+		encoded := s[i+1 : i+1+end]
+		if encoded == "" {
+			out.WriteByte('&')
+		} else if decoded, ok := decodeModifiedUTF7Segment(encoded); ok {
+			out.WriteString(decoded)
+		} else {
+			out.WriteString(s[i : i+end+2])
+		}
+		i += end + 2
+	}
+	return out.String()
+}
+
+func decodeModifiedUTF7Segment(encoded string) (string, bool) {
+	encoded = strings.ReplaceAll(encoded, ",", "/")
+	if rem := len(encoded) % 4; rem != 0 {
+		encoded += strings.Repeat("=", 4-rem)
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data)%2 != 0 {
+		return "", false
+	}
+	words := make([]uint16, 0, len(data)/2)
+	for i := 0; i < len(data); i += 2 {
+		words = append(words, uint16(data[i])<<8|uint16(data[i+1]))
+	}
+	return string(utf16.Decode(words)), true
 }
 
 func firstSubmatch(pattern, input, fallback string) string {
