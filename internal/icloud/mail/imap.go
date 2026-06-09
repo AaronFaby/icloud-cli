@@ -451,7 +451,9 @@ func parseFetch(folder, fallbackID string, resp imapResponse, includeRaw bool) M
 			if size := firstSubmatch(`RFC822\.SIZE ([0-9]+)`, line, ""); size != "" {
 				msg.Size, _ = strconv.Atoi(size)
 			}
-			msg.Flags = parseFlags(line)
+		}
+		if flags := parseFlags(line); len(flags) > 0 {
+			msg.Flags = flags
 		}
 	}
 	if len(resp.Literals) > 0 {

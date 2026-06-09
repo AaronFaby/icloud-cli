@@ -53,3 +53,21 @@ func TestEnsureCRLF(t *testing.T) {
 		t.Fatalf("message = %q", got)
 	}
 }
+
+func TestParseFetchReadsFlagsFromContinuationLine(t *testing.T) {
+	msg := parseFetch("INBOX", "183860", imapResponse{
+		Lines: []string{
+			`* 1 FETCH (UID 183860 RFC822.SIZE 42 BODY[HEADER] {10}`,
+			"Subject: x",
+			` FLAGS (\Seen \Flagged) INTERNALDATE "09-Jun-2026 06:00:00 -0700")`,
+			`A0001 OK Fetch completed`,
+		},
+		Literals: []string{"Subject: x\r\n\r\n"},
+	}, false)
+	if msg.ID != "183860" {
+		t.Fatalf("id = %q", msg.ID)
+	}
+	if len(msg.Flags) != 2 || msg.Flags[0] != `\Seen` || msg.Flags[1] != `\Flagged` {
+		t.Fatalf("flags = %#v", msg.Flags)
+	}
+}
