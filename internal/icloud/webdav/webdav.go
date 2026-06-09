@@ -26,6 +26,7 @@ type Resource struct {
 	ResourceTypes []string `json:"resource_types,omitempty"`
 	ETag          string   `json:"etag,omitempty"`
 	Data          string   `json:"data,omitempty"`
+	propHrefs     map[string]string
 }
 
 type Client struct {
@@ -43,17 +44,27 @@ func New(baseURL string, cfg config.Config) *Client {
 }
 
 func (c *Client) ListCalendars(ctx context.Context) ([]Resource, error) {
-	resources, err := c.propfind(ctx, c.BaseURL, calendarBody(), "1")
+	homeURL, err := c.discoverHomeSet(ctx, ".well-known/caldav", currentUserPrincipalBody(), calendarHomeSetBody(), "calendar-home-set")
 	if err != nil {
-		return nil, output.Remote("caldav_list_failed", "failed to list iCloud calendars", err.Error())
+		return nil, wrapRemote("caldav_discovery_failed", "failed to discover iCloud calendar home", err)
+	}
+	resources, err := c.propfind(ctx, homeURL, calendarBody(), "1")
+	if err != nil {
+		return nil, wrapRemote("caldav_list_failed", "failed to list iCloud calendars", err)
 	}
 	return resources, nil
 }
 
 func (c *Client) ListAddressBooks(ctx context.Context) ([]Resource, error) {
-	resources, err := c.propfind(ctx, c.BaseURL, addressBookBody(), "1")
+	homeURL, err := c.discoverHomeSet(ctx, ".well-known/carddav", currentUserPrincipalBody(), addressBookHomeSetBody(), "addressbook-home-set")
+	if isExitCode(err, "webdav_discovery_failed") {
+		homeURL = c.BaseURL
+	} else if err != nil {
+		return nil, wrapRemote("carddav_discovery_failed", "failed to discover iCloud address book home", err)
+	}
+	resources, err := c.propfind(ctx, homeURL, addressBookBody(), "1")
 	if err != nil {
-		return nil, output.Remote("carddav_list_failed", "failed to list iCloud address books", err.Error())
+		return nil, wrapRemote("carddav_list_failed", "failed to list iCloud address books", err)
 	}
 	return resources, nil
 }
@@ -61,7 +72,7 @@ func (c *Client) ListAddressBooks(ctx context.Context) ([]Resource, error) {
 func (c *Client) ListEvents(ctx context.Context, calendarHref, from, to string) ([]Resource, error) {
 	resources, err := c.report(ctx, c.resourceURL(calendarHref), calendarQueryBody(from, to), "1")
 	if err != nil {
-		return nil, output.Remote("caldav_events_list_failed", "failed to list iCloud calendar events", err.Error())
+		return nil, wrapRemote("caldav_events_list_failed", "failed to list iCloud calendar events", err)
 	}
 	return resources, nil
 }
@@ -83,7 +94,7 @@ func (c *Client) DeleteEvent(ctx context.Context, calendarHref, id string) error
 func (c *Client) ListContacts(ctx context.Context, bookHref string) ([]Resource, error) {
 	resources, err := c.report(ctx, c.resourceURL(bookHref), addressBookQueryBody(), "1")
 	if err != nil {
-		return nil, output.Remote("carddav_contacts_list_failed", "failed to list iCloud contacts", err.Error())
+		return nil, wrapRemote("carddav_contacts_list_failed", "failed to list iCloud contacts", err)
 	}
 	return resources, nil
 }
@@ -112,6 +123,28 @@ func (c *Client) propfind(ctx context.Context, url string, body string, depth st
 
 func (c *Client) report(ctx context.Context, url string, body string, depth string) ([]Resource, error) {
 	return c.xmlRequest(ctx, "REPORT", url, body, depth)
+}
+
+func (c *Client) discoverHomeSet(ctx context.Context, wellKnownPath, principalBody, homeSetBody, homeSetName string) (string, error) {
+	principalURL := c.childURL(c.BaseURL, wellKnownPath)
+	resources, err := c.propfind(ctx, principalURL, principalBody, "0")
+	if err != nil {
+		return "", err
+	}
+	principalHref := firstPropHref(resources, "current-user-principal")
+	if principalHref == "" {
+		return "", output.Remote("webdav_discovery_failed", "iCloud WebDAV principal discovery returned no current-user-principal", map[string]string{"url": principalURL})
+	}
+
+	homeResources, err := c.propfind(ctx, c.resourceURL(principalHref), homeSetBody, "0")
+	if err != nil {
+		return "", err
+	}
+	homeHref := firstPropHref(homeResources, homeSetName)
+	if homeHref == "" {
+		return "", output.Remote("webdav_discovery_failed", "iCloud WebDAV home-set discovery returned no "+homeSetName, map[string]string{"principal": principalHref})
+	}
+	return c.resourceURL(homeHref), nil
 }
 
 func (c *Client) xmlRequest(ctx context.Context, method string, url string, body string, depth string) ([]Resource, error) {
@@ -221,15 +254,22 @@ type propstat struct {
 }
 
 type prop struct {
-	DisplayName  string       `xml:"displayname"`
-	ResourceType resourceType `xml:"resourcetype"`
-	ETag         string       `xml:"getetag"`
-	CalendarData string       `xml:"calendar-data"`
-	AddressData  string       `xml:"address-data"`
+	DisplayName          string       `xml:"displayname"`
+	ResourceType         resourceType `xml:"resourcetype"`
+	ETag                 string       `xml:"getetag"`
+	CalendarData         string       `xml:"calendar-data"`
+	AddressData          string       `xml:"address-data"`
+	CurrentUserPrincipal hrefProp     `xml:"current-user-principal"`
+	CalendarHomeSet      hrefProp     `xml:"calendar-home-set"`
+	AddressBookHomeSet   hrefProp     `xml:"addressbook-home-set"`
 }
 
 type resourceType struct {
 	Any []xml.Name `xml:",any"`
+}
+
+type hrefProp struct {
+	Href string `xml:"href"`
 }
 
 func parseMultistatus(b []byte) ([]Resource, error) {
@@ -253,6 +293,9 @@ func parseMultistatus(b []byte) ([]Resource, error) {
 			if ps.Prop.AddressData != "" {
 				res.Data = ps.Prop.AddressData
 			}
+			addPropHref(&res, "current-user-principal", ps.Prop.CurrentUserPrincipal.Href)
+			addPropHref(&res, "calendar-home-set", ps.Prop.CalendarHomeSet.Href)
+			addPropHref(&res, "addressbook-home-set", ps.Prop.AddressBookHomeSet.Href)
 			for _, name := range ps.Prop.ResourceType.Any {
 				res.ResourceTypes = append(res.ResourceTypes, strings.TrimSpace(name.Local))
 			}
@@ -288,6 +331,40 @@ func (c *Client) childURL(parentHref, id string) string {
 	return u.String()
 }
 
+func addPropHref(res *Resource, name, href string) {
+	if strings.TrimSpace(href) == "" {
+		return
+	}
+	if res.propHrefs == nil {
+		res.propHrefs = map[string]string{}
+	}
+	res.propHrefs[name] = strings.TrimSpace(href)
+}
+
+func firstPropHref(resources []Resource, name string) string {
+	for _, resource := range resources {
+		if href := resource.propHrefs[name]; href != "" {
+			return href
+		}
+	}
+	return ""
+}
+
+func wrapRemote(code, message string, err error) error {
+	if _, ok := err.(*output.ExitError); ok {
+		return err
+	}
+	return output.Remote(code, message, err.Error())
+}
+
+func isExitCode(err error, code string) bool {
+	if err == nil {
+		return false
+	}
+	exitErr, ok := err.(*output.ExitError)
+	return ok && exitErr.Err.Code == code
+}
+
 func (c *Client) eventURL(calendarHref, id string) string {
 	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") || strings.HasPrefix(id, "/") {
 		return c.resourceURL(id)
@@ -315,6 +392,33 @@ func calendarBody() string {
     <D:displayname/>
     <D:resourcetype/>
     <C:supported-calendar-component-set/>
+  </D:prop>
+</D:propfind>`
+}
+
+func currentUserPrincipalBody() string {
+	return `<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:current-user-principal/>
+  </D:prop>
+</D:propfind>`
+}
+
+func calendarHomeSetBody() string {
+	return `<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-home-set/>
+  </D:prop>
+</D:propfind>`
+}
+
+func addressBookHomeSetBody() string {
+	return `<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <C:addressbook-home-set/>
   </D:prop>
 </D:propfind>`
 }
