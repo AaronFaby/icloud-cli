@@ -144,7 +144,7 @@ func TestListAddressBooksDiscoversAddressBookHomeSet(t *testing.T) {
     <D:href>/.well-known/carddav</D:href>
     <D:propstat>
       <D:prop>
-        <D:current-user-principal><D:href>/principal/</D:href></D:current-user-principal>
+        <D:principal-URL><D:href>/principal/</D:href></D:principal-URL>
       </D:prop>
     </D:propstat>
   </D:response>

@@ -133,6 +133,9 @@ func (c *Client) discoverHomeSet(ctx context.Context, wellKnownPath, principalBo
 	}
 	principalHref := firstPropHref(resources, "current-user-principal")
 	if principalHref == "" {
+		principalHref = firstPropHref(resources, "principal-URL")
+	}
+	if principalHref == "" {
 		return "", output.Remote("webdav_discovery_failed", "iCloud WebDAV principal discovery returned no current-user-principal", map[string]string{"url": principalURL})
 	}
 
@@ -260,6 +263,7 @@ type prop struct {
 	CalendarData         string       `xml:"calendar-data"`
 	AddressData          string       `xml:"address-data"`
 	CurrentUserPrincipal hrefProp     `xml:"current-user-principal"`
+	PrincipalURL         hrefProp     `xml:"principal-URL"`
 	CalendarHomeSet      hrefProp     `xml:"calendar-home-set"`
 	AddressBookHomeSet   hrefProp     `xml:"addressbook-home-set"`
 }
@@ -294,6 +298,7 @@ func parseMultistatus(b []byte) ([]Resource, error) {
 				res.Data = ps.Prop.AddressData
 			}
 			addPropHref(&res, "current-user-principal", ps.Prop.CurrentUserPrincipal.Href)
+			addPropHref(&res, "principal-URL", ps.Prop.PrincipalURL.Href)
 			addPropHref(&res, "calendar-home-set", ps.Prop.CalendarHomeSet.Href)
 			addPropHref(&res, "addressbook-home-set", ps.Prop.AddressBookHomeSet.Href)
 			for _, name := range ps.Prop.ResourceType.Any {
@@ -401,6 +406,7 @@ func currentUserPrincipalBody() string {
 <D:propfind xmlns:D="DAV:">
   <D:prop>
     <D:current-user-principal/>
+    <D:principal-URL/>
   </D:prop>
 </D:propfind>`
 }
