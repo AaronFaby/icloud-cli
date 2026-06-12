@@ -194,6 +194,26 @@ func TestSetFlagCommands(t *testing.T) {
 	assertCommands(t, commands, want)
 }
 
+func TestFetchMessageRawUsesBodyPeek(t *testing.T) {
+	client, commands := newScriptedIMAPClient(t, []string{
+		`* 1 EXISTS`,
+		`A0001 OK SELECT completed`,
+		`* 1 FETCH (UID 123 RFC822.SIZE 0 BODY[] NIL)`,
+		`A0002 OK FETCH completed`,
+	})
+	defer client.conn.Close()
+
+	if _, err := client.FetchMessage("INBOX", "123", true); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`A0001 SELECT "INBOX"`,
+		`A0002 UID FETCH 123 (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[])`,
+	}
+	assertCommands(t, commands, want)
+}
+
 func TestMoveFallsBackToCopyStoreExpunge(t *testing.T) {
 	client, commands := newScriptedIMAPClient(t, []string{
 		`* 1 EXISTS`,
