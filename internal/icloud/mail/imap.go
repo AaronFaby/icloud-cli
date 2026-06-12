@@ -196,7 +196,7 @@ func (c *IMAPClient) FetchMessage(folder, id string, includeRaw bool) (Message, 
 	}
 	item := "BODY.PEEK[HEADER]"
 	if includeRaw {
-		item = "RFC822"
+		item = "BODY.PEEK[]"
 	}
 	resp, err := c.command("UID FETCH %s (UID FLAGS INTERNALDATE RFC822.SIZE %s)", id, item)
 	if err != nil {
