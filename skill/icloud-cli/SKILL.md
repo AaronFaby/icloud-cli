@@ -12,6 +12,7 @@ Use this skill when working with this repository's `icloud` Go CLI.
 - Use documented protocols by default: Mail via IMAP/SMTP, Calendar via CalDAV, Contacts via CardDAV.
 - Do not add private iCloud web APIs, scraping, or session-cookie flows unless the user explicitly asks for that track.
 - Treat credentials as secrets. Never print `ICLOUD_APP_PASSWORD`; rely on the CLI's redacted JSON output.
+- Treat logs as sensitive diagnostics. Logs must contain operational metadata only, never credentials or user content.
 - Prefer machine-readable CLI calls and preserve exit codes when reporting failures.
 
 ## Credentials
@@ -32,6 +33,27 @@ icloud auth save --apple-id name@example.com --app-password app-specific-passwor
 
 Use `icloud auth check` to require credentials and `icloud auth doctor` for redacted diagnostics.
 
+## Logging
+
+Logging writes structured JSON outside stdout so command output remains machine-readable. Defaults:
+
+```sh
+ICLOUD_CLI_LOG=file
+ICLOUD_CLI_LOG_LEVEL=warn
+ICLOUD_CLI_LOG_SIZE=10
+ICLOUD_CLI_LOG_NUM=3
+```
+
+`ICLOUD_CLI_LOG` accepts `file`, `stderr`, or `off`. `ICLOUD_CLI_LOG_FILE` overrides the default OS cache path under `icloud-cli/icloud.log`.
+
+Use this command to inspect the effective logging configuration:
+
+```sh
+icloud log status
+```
+
+Logs may include command lifecycle, timings, remote status codes, resource counts, message IDs, and mutation results. Do not log app passwords, auth headers, SMTP auth payloads, Apple ID values, message bodies, raw RFC822 messages, vCards, iCalendar payloads, mail subjects, event summaries, or contact names.
+
 ## Build And Test
 
 In this workspace, keep Go's build cache inside the repo:
@@ -44,7 +66,8 @@ GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aa
 For local smoke checks that do not contact iCloud:
 
 ```sh
-/private/tmp/icloud-cli services list
+ICLOUD_CLI_LOG_FILE=/private/tmp/icloud-cli-smoke.log /private/tmp/icloud-cli services list
+ICLOUD_CLI_LOG_FILE=/private/tmp/icloud-cli-smoke.log /private/tmp/icloud-cli log status
 ICLOUD_CONFIG=/private/tmp/icloud-cli-missing.json /private/tmp/icloud-cli auth check
 /private/tmp/icloud-cli notes list
 ```

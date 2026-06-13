@@ -1,18 +1,21 @@
 <claude-mem-context>
 # Memory Context
 
-# [icloud-cli] recent context, 2026-06-12 4:36pm PDT
+# [icloud-cli] recent context, 2026-06-13 8:23am PDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 1 obs (385t read) | 6,840t work | 94% savings
+Stats: 3 obs (1,185t read) | 68,412t work | 98% savings
 
 ### Jun 8, 2026
 548 4:05p ⚖️ iCloud Go CLI Tool: Project Concept Defined for Agentic AI Use
+### Jun 12, 2026
+555 5:04p 🟣 iCloud CLI v1.0.1 Released to GitHub
+556 " ✅ GitHub Actions Workflow Opted Into Node.js 24
 
-Access 7k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 68k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
 
 # Agent Guidance
@@ -39,6 +42,15 @@ Credential precedence is environment first, then config file:
 - `ICLOUD_CONFIG`
 
 The config file can contain plaintext credentials only when the user explicitly runs `icloud auth save`.
+
+Logging is environment-configured with safe defaults:
+
+- `ICLOUD_CLI_LOG=file|stderr|off` defaults to `file`.
+- `ICLOUD_CLI_LOG_LEVEL=info|warn|error` defaults to `warn`.
+- `ICLOUD_CLI_LOG_FILE` defaults to the OS cache location under `icloud-cli/icloud.log`.
+- `ICLOUD_CLI_LOG_SIZE` defaults to `10` MB and `ICLOUD_CLI_LOG_NUM` defaults to `3`.
+
+Use `icloud log status` to inspect the effective logging configuration. Logs should be detailed operational metadata only; never log app passwords, auth headers, SMTP auth payloads, Apple ID values, message bodies, raw RFC822, vCards, iCalendar payloads, mail subjects, event summaries, or contact names.
 
 When testing in this sandbox, keep Go's build cache inside the workspace:
 

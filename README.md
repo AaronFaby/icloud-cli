@@ -48,6 +48,24 @@ Override with:
 export ICLOUD_CONFIG=/path/to/config.json
 ```
 
+## Logging
+
+The CLI writes structured JSON logs outside stdout so command output remains machine-readable. Logging is configured with environment variables:
+
+- `ICLOUD_CLI_LOG`: `file`, `stderr`, or `off`; default `file`.
+- `ICLOUD_CLI_LOG_LEVEL`: `info`, `warn`, or `error`; default `warn`.
+- `ICLOUD_CLI_LOG_FILE`: log file path; default is the OS user cache directory plus `icloud-cli/icloud.log`.
+- `ICLOUD_CLI_LOG_SIZE`: active log file size in MB before rotation; default `10`.
+- `ICLOUD_CLI_LOG_NUM`: number of historical log files to preserve; default `3`.
+
+Inspect the effective logging configuration:
+
+```sh
+icloud log status
+```
+
+Logs include operational metadata such as command lifecycle, timings, remote status codes, resource counts, message IDs, and mutation results. Logs do not include app passwords, auth headers, SMTP auth payloads, Apple ID values, message bodies, raw RFC822 messages, vCards, iCalendar payloads, mail subjects, event summaries, or contact names.
+
 ## Exit Codes
 
 - `0`: success

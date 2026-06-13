@@ -88,3 +88,17 @@ func TestBuildMessageCreatesMultipartAlternative(t *testing.T) {
 		t.Fatalf("message missing multipart parts: %s", raw)
 	}
 }
+
+func TestSMTPCommandNameRedactsAddressCommands(t *testing.T) {
+	tests := map[string]string{
+		"AUTH PLAIN abc123":              "AUTH",
+		"MAIL FROM:<sender@example.com>": "MAIL FROM",
+		"RCPT TO:<one@example.com>":      "RCPT TO",
+		"DATA":                           "DATA",
+	}
+	for line, want := range tests {
+		if got := smtpCommandName(line); got != want {
+			t.Fatalf("smtpCommandName(%q) = %q, want %q", line, got, want)
+		}
+	}
+}
