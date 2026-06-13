@@ -13,13 +13,15 @@ The CLI is JSON-first and noninteractive. Missing credentials, validation errors
 
 ## Status
 
-`v1.0.0` covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The v1.0 surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
+The current release is `v1.0.2`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
 
 Release builds are produced for:
 
 - Linux amd64
 - Linux arm64
 - macOS arm64
+
+Download prebuilt binaries from the [GitHub releases page](https://github.com/AaronFaby/icloud-cli/releases). Each release includes platform tarballs and matching `.sha256` files.
 
 ## Credentials
 
@@ -30,11 +32,17 @@ export ICLOUD_APPLE_ID="name@example.com"
 export ICLOUD_APP_PASSWORD="app-specific-password"
 ```
 
+Create the app-specific password from your Apple Account. Apple documents the flow in [Sign in to apps with your Apple Account using app-specific passwords](https://support.apple.com/en-us/102654): sign in at `account.apple.com`, open Sign-In and Security, then select App-Specific Passwords. Two-factor authentication must be enabled on the Apple Account.
+
+Use the generated app-specific password as `ICLOUD_APP_PASSWORD`, not your primary Apple Account password. If you reset your primary Apple Account password or revoke the app-specific password, generate a new app-specific password and update the environment variable or saved config.
+
 Optional plaintext config file storage:
 
 ```sh
 icloud auth save --apple-id name@example.com --app-password app-specific-password
 ```
+
+Prefer environment variables for automation. `auth save` writes plaintext JSON and should only be used on machines where that tradeoff is acceptable.
 
 Default config path:
 
