@@ -13,6 +13,7 @@ import (
 	"github.com/aaronfaby/icloud-cli/internal/icloud"
 	"github.com/aaronfaby/icloud-cli/internal/icloud/mail"
 	"github.com/aaronfaby/icloud-cli/internal/icloud/webdav"
+	"github.com/aaronfaby/icloud-cli/internal/logging"
 	"github.com/aaronfaby/icloud-cli/internal/output"
 )
 
@@ -48,13 +49,20 @@ type contactInput struct {
 }
 
 func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	logging.Configure(logging.LoadConfig(), stderr)
 	a := app{args: args, stdin: stdin, stdout: stdout, stderr: stderr}
 	service, operation := classify(args)
+	start := time.Now()
+	logging.Info("command_start", "service", service, "operation", operation, "args", logging.SanitizedArgs(args))
 	data, err := a.dispatch()
 	if err != nil {
-		return output.Failure(stdout, service, operation, err)
+		code := output.Failure(stdout, service, operation, err)
+		logFailure(code, service, operation, start, err)
+		return code
 	}
-	return output.Success(stdout, service, operation, data)
+	code := output.Success(stdout, service, operation, data)
+	logging.Info("command_success", "service", service, "operation", operation, "exit_code", code, "duration_ms", time.Since(start).Milliseconds())
+	return code
 }
 
 func (a app) dispatch() (any, error) {
@@ -68,6 +76,8 @@ func (a app) dispatch() (any, error) {
 		return a.auth(a.args[1:])
 	case "services":
 		return a.services(a.args[1:])
+	case "log":
+		return a.log(a.args[1:])
 	case "mail":
 		return a.mail(a.args[1:])
 	case "calendar":
@@ -78,6 +88,22 @@ func (a app) dispatch() (any, error) {
 		return nil, output.Unsupported(a.args[0], "this iCloud service is listed but not implemented in the documented-protocol v1")
 	default:
 		return nil, output.Validation("unknown_command", "unknown command", map[string]string{"command": a.args[0]})
+	}
+}
+
+func (a app) log(args []string) (any, error) {
+	if len(args) == 0 {
+		return nil, output.Validation("missing_log_command", "log command is required", nil)
+	}
+	switch args[0] {
+	case "status":
+		fs := newFlagSet("log status")
+		if err := fs.Parse(args[1:]); err != nil {
+			return nil, err
+		}
+		return logging.CurrentStatus(), nil
+	default:
+		return nil, output.Validation("unknown_log_command", "unknown log command", map[string]string{"command": args[0]})
 	}
 }
 
@@ -634,10 +660,13 @@ func (a app) webdavClient(configPath string, baseURL string) (*webdav.Client, co
 func (a app) decodeInput(input string, v any) error {
 	var b []byte
 	var err error
+	source := "stdin"
 	switch {
 	case strings.HasPrefix(input, "@"):
+		source = "file"
 		b, err = os.ReadFile(strings.TrimPrefix(input, "@"))
 	case strings.TrimSpace(input) != "":
+		source = "argument"
 		b = []byte(input)
 	default:
 		b, err = io.ReadAll(a.stdin)
@@ -651,6 +680,7 @@ func (a app) decodeInput(input string, v any) error {
 	if err := json.Unmarshal(b, v); err != nil {
 		return output.Validation("invalid_input_json", "failed to parse JSON input", err.Error())
 	}
+	logging.Info("json_input_decoded", "source", source, "bytes", len(b))
 	return nil
 }
 
@@ -786,13 +816,37 @@ func firstNonEmpty(values ...string) string {
 
 func usage() map[string]any {
 	return map[string]any{
-		"usage": "icloud <auth|services|mail|calendar|contacts> ...",
+		"usage": "icloud <auth|services|log|mail|calendar|contacts> ...",
 		"examples": []string{
 			"icloud auth check",
 			"icloud services list",
+			"icloud log status",
 			"icloud mail folders list",
 			"icloud mail messages list --folder INBOX --limit 10",
 			`icloud mail batch move --input-json '{"folder":"INBOX","ids":["123"],"to_folder":"Archive"}'`,
 		},
 	}
+}
+
+func logFailure(code int, service, operation string, start time.Time, err error) {
+	args := []any{
+		"service", service,
+		"operation", operation,
+		"exit_code", code,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"error_code", errorCode(err),
+		"error_message", err.Error(),
+	}
+	if code == output.ExitUnexpected || code == output.ExitRemote {
+		logging.Error("command_failure", args...)
+		return
+	}
+	logging.Warn("command_failure", args...)
+}
+
+func errorCode(err error) string {
+	if exitErr, ok := err.(*output.ExitError); ok {
+		return exitErr.Err.Code
+	}
+	return "unexpected_error"
 }

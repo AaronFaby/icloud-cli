@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aaronfaby/icloud-cli/internal/logging"
 	"github.com/aaronfaby/icloud-cli/internal/output"
 )
 
@@ -69,6 +70,7 @@ func Load(path string) (Config, SourceReport, error) {
 		report.AppPassword = "env"
 	}
 
+	logging.Info("config_loaded", "config_path", path, "apple_id_source", report.AppleID, "app_password_source", report.AppPassword)
 	return cfg, report, nil
 }
 
@@ -92,6 +94,7 @@ func Save(opts SaveOptions) (string, error) {
 	if err := os.WriteFile(opts.Path, append(b, '\n'), 0o600); err != nil {
 		return "", output.Validation("config_write_failed", "failed to write config file", err.Error())
 	}
+	logging.Warn("credentials_saved_plaintext", "config_path", opts.Path)
 	return opts.Path, nil
 }
 
@@ -108,8 +111,10 @@ func RequireCredentials(path string) (Config, SourceReport, error) {
 		missing["app_password"] = true
 	}
 	if len(missing) > 0 {
+		logging.Warn("credentials_missing", "apple_id_missing", missing["apple_id"], "app_password_missing", missing["app_password"])
 		return Config{}, report, output.Auth("missing_credentials", "iCloud credentials are required", missing)
 	}
+	logging.Info("credentials_loaded", "apple_id_source", report.AppleID, "app_password_source", report.AppPassword)
 	return cfg, report, nil
 }
 

@@ -3,13 +3,17 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/aaronfaby/icloud-cli/internal/logging"
 	"github.com/aaronfaby/icloud-cli/internal/output"
 )
 
 func TestServicesListJSON(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
 	var stdout bytes.Buffer
 	code := Run([]string{"services", "list"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
 	if code != output.ExitOK {
@@ -25,6 +29,7 @@ func TestServicesListJSON(t *testing.T) {
 }
 
 func TestMissingCredentialsUsesAuthExit(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
 	t.Setenv("ICLOUD_APPLE_ID", "")
 	t.Setenv("ICLOUD_APP_PASSWORD", "")
 	t.Setenv("ICLOUD_CONFIG", t.TempDir()+"/missing.json")
@@ -43,10 +48,101 @@ func TestMissingCredentialsUsesAuthExit(t *testing.T) {
 }
 
 func TestUnsupportedServiceExit(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
 	var stdout bytes.Buffer
 	code := Run([]string{"notes", "list"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
 	if code != output.ExitUnsupported {
 		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+}
+
+func TestLogStatusJSON(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "icloud.log")
+	t.Setenv(logging.EnvLog, logging.DestinationFile)
+	t.Setenv(logging.EnvLogFile, logPath)
+	t.Setenv(logging.EnvLogLevel, "info")
+	t.Setenv(logging.EnvLogSize, "1")
+	t.Setenv(logging.EnvLogNum, "0")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"log", "status"}, strings.NewReader(""), &stdout, &stderr)
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s, stderr = %s", code, stdout.String(), stderr.String())
+	}
+	var env struct {
+		OK        bool           `json:"ok"`
+		Service   string         `json:"service"`
+		Operation string         `json:"operation"`
+		Data      logging.Status `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK || env.Service != "log" || env.Operation != "status" {
+		t.Fatalf("unexpected envelope: %#v", env)
+	}
+	if !env.Data.Enabled || env.Data.Destination != logging.DestinationFile || env.Data.FilePath != logPath || env.Data.SizeMB != 1 || env.Data.History != 0 {
+		t.Fatalf("unexpected status: %#v", env.Data)
+	}
+	if env.Data.ActiveFile == nil || !env.Data.ActiveFile.Exists {
+		t.Fatalf("missing active file status: %#v", env.Data.ActiveFile)
+	}
+}
+
+func TestStderrLoggingDoesNotBreakStdoutJSON(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationStderr)
+	t.Setenv(logging.EnvLogLevel, "info")
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"services", "list"}, strings.NewReader(""), &stdout, &stderr)
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+	var env output.Envelope
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "command_start") || !strings.Contains(stderr.String(), "command_success") {
+		t.Fatalf("stderr missing lifecycle logs: %q", stderr.String())
+	}
+}
+
+func TestLogOffCreatesNoFile(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "icloud.log")
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
+	t.Setenv(logging.EnvLogFile, logPath)
+
+	var stdout bytes.Buffer
+	code := Run([]string{"services", "list"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("log file exists with logging off, err=%v", err)
+	}
+}
+
+func TestInvalidLoggingEnvWarnsAndFallsBack(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "icloud.log")
+	t.Setenv(logging.EnvLog, "nope")
+	t.Setenv(logging.EnvLogFile, logPath)
+	t.Setenv(logging.EnvLogSize, "bad")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"log", "status"}, strings.NewReader(""), &stdout, &stderr)
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s, stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), logging.EnvLog) || !strings.Contains(stderr.String(), logging.EnvLogSize) {
+		t.Fatalf("stderr missing logging warnings: %q", stderr.String())
+	}
+	var env struct {
+		Data logging.Status `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Data.Destination != logging.DestinationFile || env.Data.SizeMB != 10 || len(env.Data.Warnings) != 2 {
+		t.Fatalf("unexpected status: %#v", env.Data)
 	}
 }
 
