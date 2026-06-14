@@ -89,6 +89,7 @@ Mail:
 ```sh
 icloud mail folders list
 icloud mail messages list --folder INBOX --limit 10
+icloud mail messages list --folder INBOX --unread --since 24h --from domain.com --flagged --limit 10
 icloud mail messages search --folder INBOX --query 'FROM "alerts@example.com"'
 icloud mail messages get --folder INBOX --id 123 --raw
 icloud mail messages move --folder INBOX --id 123 --to-folder Archive
@@ -100,13 +101,16 @@ Mail behavior notes:
 
 - Send uses SMTP and saves a copy to the detected Sent mailbox over IMAP.
 - Delete moves to the detected `\Trash` mailbox by default; permanent delete requires `--permanent`.
+- Message summary headers are decoded by default; `messages list --raw-headers` preserves raw subject/from/to/date fields.
 - `messages get` includes parsed IMAP flags when the server returns them.
+- `--json` is accepted on every command as a no-op because JSON output is already the default.
 
 Calendar:
 
 ```sh
 icloud calendar calendars list
 icloud calendar events list --calendar /calendar/href/ --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
+icloud calendar events list --calendar-name Aristotle --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
 icloud calendar events create --calendar /calendar/href/ --input-json '{"summary":"Planning","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
 icloud calendar events update --calendar /calendar/href/ --id /calendar/href/event.ics --input-json '{"summary":"Planning updated","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
 icloud calendar events delete --calendar /calendar/href/ --id /calendar/href/event.ics

@@ -50,6 +50,7 @@ type contactInput struct {
 
 func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 	logging.Configure(logging.LoadConfig(), stderr)
+	args = normalizeArgs(args)
 	a := app{args: args, stdin: stdin, stdout: stdout, stderr: stderr}
 	service, operation := classify(args)
 	start := time.Now()
@@ -98,8 +99,8 @@ func (a app) log(args []string) (any, error) {
 	switch args[0] {
 	case "status":
 		fs := newFlagSet("log status")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		return logging.CurrentStatus(), nil
 	default:
@@ -115,8 +116,8 @@ func (a app) auth(args []string) (any, error) {
 	case "check":
 		fs := newFlagSet("auth check")
 		configPath := fs.String("config", "", "config path")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		cfg, report, err := config.RequireCredentials(*configPath)
 		if err != nil {
@@ -128,8 +129,8 @@ func (a app) auth(args []string) (any, error) {
 		configPath := fs.String("config", "", "config path")
 		appleID := fs.String("apple-id", "", "Apple ID")
 		appPassword := fs.String("app-password", "", "app-specific password")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		path, err := config.Save(config.SaveOptions{Path: *configPath, AppleID: *appleID, AppPassword: *appPassword})
 		if err != nil {
@@ -139,8 +140,8 @@ func (a app) auth(args []string) (any, error) {
 	case "doctor":
 		fs := newFlagSet("auth doctor")
 		configPath := fs.String("config", "", "config path")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		cfg, report, err := config.Load(*configPath)
 		if err != nil {
@@ -191,8 +192,8 @@ func (a app) mailFolders(args []string) (any, error) {
 	case "list":
 		fs := newFlagSet("mail folders list")
 		configPath := fs.String("config", "", "config path")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		client, err := a.imapClient(*configPath)
 		if err != nil {
@@ -204,8 +205,8 @@ func (a app) mailFolders(args []string) (any, error) {
 		fs := newFlagSet("mail folders create")
 		configPath := fs.String("config", "", "config path")
 		name := fs.String("name", "", "folder name")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		client, err := a.imapClient(*configPath)
 		if err != nil {
@@ -221,8 +222,8 @@ func (a app) mailFolders(args []string) (any, error) {
 		configPath := fs.String("config", "", "config path")
 		folder := fs.String("folder", "", "source folder")
 		name := fs.String("name", "", "new folder name")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		client, err := a.imapClient(*configPath)
 		if err != nil {
@@ -237,8 +238,8 @@ func (a app) mailFolders(args []string) (any, error) {
 		fs := newFlagSet("mail folders delete")
 		configPath := fs.String("config", "", "config path")
 		folder := fs.String("folder", "", "folder")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		client, err := a.imapClient(*configPath)
 		if err != nil {
@@ -261,7 +262,16 @@ func (a app) mailMessages(args []string) (any, error) {
 		configPath := fs.String("config", "", "config path")
 		folder := fs.String("folder", "INBOX", "folder")
 		limit := fs.Int("limit", 25, "message limit")
-		if err := fs.Parse(args[1:]); err != nil {
+		unread := fs.Bool("unread", false, "only unread messages")
+		flagged := fs.Bool("flagged", false, "only flagged messages")
+		since := fs.String("since", "", "only messages since duration, RFC3339 time, or YYYY-MM-DD date")
+		from := fs.String("from", "", "from address or domain text")
+		rawHeaders := fs.Bool("raw-headers", false, "include raw header fields")
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
+		}
+		sinceCriteria, err := parseMailSince(*since, time.Now)
+		if err != nil {
 			return nil, err
 		}
 		client, err := a.imapClient(*configPath)
@@ -269,15 +279,23 @@ func (a app) mailMessages(args []string) (any, error) {
 			return nil, err
 		}
 		defer client.Close()
-		return client.ListMessages(*folder, *limit)
+		return client.ListMessagesWithOptions(mail.MessageListOptions{
+			Folder:     *folder,
+			Limit:      *limit,
+			Unread:     *unread,
+			Flagged:    *flagged,
+			Since:      sinceCriteria,
+			From:       *from,
+			RawHeaders: *rawHeaders,
+		})
 	case "get":
 		fs := newFlagSet("mail messages get")
 		configPath := fs.String("config", "", "config path")
 		folder := fs.String("folder", "INBOX", "folder")
 		id := fs.String("id", "", "message UID")
 		raw := fs.Bool("raw", false, "include raw RFC822 message")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		client, err := a.imapClient(*configPath)
 		if err != nil {
@@ -290,8 +308,8 @@ func (a app) mailMessages(args []string) (any, error) {
 		configPath := fs.String("config", "", "config path")
 		folder := fs.String("folder", "INBOX", "folder")
 		query := fs.String("query", "ALL", "IMAP criteria or text query")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		client, err := a.imapClient(*configPath)
 		if err != nil {
@@ -307,8 +325,8 @@ func (a app) mailMessages(args []string) (any, error) {
 		fs := newFlagSet("mail send")
 		configPath := fs.String("config", "", "config path")
 		inputJSON := fs.String("input-json", "", "JSON request or @path")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		cfg, _, err := config.RequireCredentials(*configPath)
 		if err != nil {
@@ -337,8 +355,8 @@ func (a app) singleMailMutation(args []string) (any, error) {
 	archiveFolder := fs.String("archive-folder", mail.DefaultArchive, "archive folder")
 	permanent := fs.Bool("permanent", false, "permanently delete")
 	dryRun := fs.Bool("dry-run", false, "preview mutation")
-	if err := fs.Parse(args[1:]); err != nil {
-		return nil, err
+	if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+		return help, err
 	}
 	if strings.TrimSpace(*id) == "" {
 		return nil, output.Validation("missing_message_id", "message id is required", nil)
@@ -378,8 +396,8 @@ func (a app) mailBatch(args []string) (any, error) {
 	fs := newFlagSet("mail batch " + op)
 	configPath := fs.String("config", "", "config path")
 	inputJSON := fs.String("input-json", "", "JSON request or @path")
-	if err := fs.Parse(args[1:]); err != nil {
-		return nil, err
+	if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+		return help, err
 	}
 	var req mail.BatchRequest
 	if err := a.decodeInput(*inputJSON, &req); err != nil {
@@ -434,8 +452,8 @@ func (a app) calendar(args []string) (any, error) {
 	if args[0] == "calendars" && args[1] == "list" {
 		fs := newFlagSet("calendar calendars list")
 		configPath := fs.String("config", "", "config path")
-		if err := fs.Parse(args[2:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[2:]); help != nil || err != nil {
+			return help, err
 		}
 		cfg, _, err := config.RequireCredentials(*configPath)
 		if err != nil {
@@ -457,28 +475,36 @@ func (a app) calendarEvents(args []string) (any, error) {
 		fs := newFlagSet("calendar events list")
 		configPath := fs.String("config", "", "config path")
 		calendarHref := fs.String("calendar", "", "calendar href from calendars list")
+		calendarName := fs.String("calendar-name", "", "calendar display name from calendars list")
 		from := fs.String("from", "", "RFC3339 or CalDAV UTC start")
 		to := fs.String("to", "", "RFC3339 or CalDAV UTC end")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
-		if strings.TrimSpace(*calendarHref) == "" {
-			return nil, output.Validation("missing_calendar", "calendar href is required", nil)
+		if strings.TrimSpace(*calendarHref) != "" && strings.TrimSpace(*calendarName) != "" {
+			return nil, output.Validation("ambiguous_calendar", "calendar and calendar-name are mutually exclusive", nil)
 		}
 		client, ctx, cancel, err := a.webdavClient(*configPath, webdav.CalendarBase)
 		if err != nil {
 			return nil, err
 		}
 		defer cancel()
-		return client.ListEvents(ctx, *calendarHref, *from, *to)
+		href := strings.TrimSpace(*calendarHref)
+		if href == "" {
+			href, err = resolveCalendarName(ctx, client, *calendarName)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return client.ListEvents(ctx, href, *from, *to)
 	case "create", "update":
 		fs := newFlagSet("calendar events " + args[0])
 		configPath := fs.String("config", "", "config path")
 		calendarHref := fs.String("calendar", "", "calendar href from calendars list")
 		id := fs.String("id", "", "event resource id or href")
 		inputJSON := fs.String("input-json", "", "JSON request or @path")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		if strings.TrimSpace(*calendarHref) == "" {
 			return nil, output.Validation("missing_calendar", "calendar href is required", nil)
@@ -505,8 +531,8 @@ func (a app) calendarEvents(args []string) (any, error) {
 		configPath := fs.String("config", "", "config path")
 		calendarHref := fs.String("calendar", "", "calendar href from calendars list")
 		id := fs.String("id", "", "event resource id or href")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		if strings.TrimSpace(*calendarHref) == "" || strings.TrimSpace(*id) == "" {
 			return nil, output.Validation("missing_calendar_event", "calendar and id are required", nil)
@@ -532,8 +558,8 @@ func (a app) contacts(args []string) (any, error) {
 	if args[0] == "books" && args[1] == "list" {
 		fs := newFlagSet("contacts books list")
 		configPath := fs.String("config", "", "config path")
-		if err := fs.Parse(args[2:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[2:]); help != nil || err != nil {
+			return help, err
 		}
 		cfg, _, err := config.RequireCredentials(*configPath)
 		if err != nil {
@@ -555,8 +581,8 @@ func (a app) contactResources(args []string) (any, error) {
 		fs := newFlagSet("contacts contacts list")
 		configPath := fs.String("config", "", "config path")
 		bookHref := fs.String("book", "", "address book href from books list")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		if strings.TrimSpace(*bookHref) == "" {
 			return nil, output.Validation("missing_book", "address book href is required", nil)
@@ -572,8 +598,8 @@ func (a app) contactResources(args []string) (any, error) {
 		configPath := fs.String("config", "", "config path")
 		bookHref := fs.String("book", "", "address book href from books list")
 		id := fs.String("id", "", "contact resource id or href")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		if strings.TrimSpace(*bookHref) == "" || strings.TrimSpace(*id) == "" {
 			return nil, output.Validation("missing_contact", "book and id are required", nil)
@@ -590,8 +616,8 @@ func (a app) contactResources(args []string) (any, error) {
 		bookHref := fs.String("book", "", "address book href from books list")
 		id := fs.String("id", "", "contact resource id or href")
 		inputJSON := fs.String("input-json", "", "JSON request or @path")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		if strings.TrimSpace(*bookHref) == "" {
 			return nil, output.Validation("missing_book", "address book href is required", nil)
@@ -618,8 +644,8 @@ func (a app) contactResources(args []string) (any, error) {
 		configPath := fs.String("config", "", "config path")
 		bookHref := fs.String("book", "", "address book href from books list")
 		id := fs.String("id", "", "contact resource id or href")
-		if err := fs.Parse(args[1:]); err != nil {
-			return nil, err
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
 		}
 		if strings.TrimSpace(*bookHref) == "" || strings.TrimSpace(*id) == "" {
 			return nil, output.Validation("missing_contact", "book and id are required", nil)
@@ -707,6 +733,84 @@ func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs
+}
+
+func normalizeArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--json" || arg == "-json" || strings.HasPrefix(arg, "--json=") || strings.HasPrefix(arg, "-json=") {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func parseFlags(fs *flag.FlagSet, args []string) (any, error) {
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return commandHelp(fs), nil
+		}
+		return nil, err
+	}
+	return nil, nil
+}
+
+func commandHelp(fs *flag.FlagSet) map[string]any {
+	flags := []map[string]any{}
+	fs.VisitAll(func(f *flag.Flag) {
+		flags = append(flags, map[string]any{
+			"name":    f.Name,
+			"usage":   f.Usage,
+			"default": f.DefValue,
+		})
+	})
+	return map[string]any{
+		"usage": "icloud " + fs.Name() + " [flags]",
+		"flags": flags,
+	}
+}
+
+func parseMailSince(s string, now func() time.Time) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return now().Add(-d).Format("02-Jan-2006"), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Format("02-Jan-2006"), nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.Format("02-Jan-2006"), nil
+	}
+	return "", output.Validation("invalid_since", "since must be a duration, RFC3339 time, or YYYY-MM-DD date", map[string]string{"since": s})
+}
+
+func resolveCalendarName(ctx context.Context, client *webdav.Client, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", output.Validation("missing_calendar", "calendar href or calendar-name is required", nil)
+	}
+	calendars, err := client.ListCalendars(ctx)
+	if err != nil {
+		return "", err
+	}
+	var matches []webdav.Resource
+	for _, calendar := range calendars {
+		if strings.EqualFold(strings.TrimSpace(calendar.DisplayName), name) {
+			matches = append(matches, calendar)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", output.Validation("calendar_not_found", "calendar name was not found", map[string]string{"calendar_name": name})
+	case 1:
+		return matches[0].Href, nil
+	default:
+		return "", output.Validation("ambiguous_calendar_name", "calendar name matched multiple calendars", map[string]any{"calendar_name": name, "matches": len(matches)})
+	}
 }
 
 func buildCalendarData(input eventInput) (string, error) {

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	netmail "net/mail"
 	"regexp"
@@ -160,16 +161,21 @@ func (c *IMAPClient) DeleteFolder(folder string) error {
 }
 
 func (c *IMAPClient) ListMessages(folder string, limit int) ([]MessageSummary, error) {
-	ids, err := c.Search(folder, "ALL")
+	return c.ListMessagesWithOptions(MessageListOptions{Folder: folder, Limit: limit})
+}
+
+func (c *IMAPClient) ListMessagesWithOptions(opts MessageListOptions) ([]MessageSummary, error) {
+	folder := defaultFolder(opts.Folder)
+	ids, err := c.Search(folder, buildSearchCriteria(opts))
 	if err != nil {
 		return nil, err
 	}
-	if limit > 0 && len(ids) > limit {
-		ids = ids[len(ids)-limit:]
+	if opts.Limit > 0 && len(ids) > opts.Limit {
+		ids = ids[len(ids)-opts.Limit:]
 	}
 	out := make([]MessageSummary, 0, len(ids))
 	for i := len(ids) - 1; i >= 0; i-- {
-		msg, err := c.FetchMessage(folder, ids[i], false)
+		msg, err := c.FetchMessageWithOptions(folder, ids[i], FetchOptions{RawHeaders: opts.RawHeaders})
 		if err != nil {
 			return nil, err
 		}
@@ -208,6 +214,10 @@ func (c *IMAPClient) Search(folder, query string) ([]string, error) {
 }
 
 func (c *IMAPClient) FetchMessage(folder, id string, includeRaw bool) (Message, error) {
+	return c.FetchMessageWithOptions(folder, id, FetchOptions{IncludeRaw: includeRaw})
+}
+
+func (c *IMAPClient) FetchMessageWithOptions(folder, id string, opts FetchOptions) (Message, error) {
 	if strings.TrimSpace(id) == "" {
 		return Message{}, output.Validation("missing_message_id", "message id is required", nil)
 	}
@@ -218,28 +228,28 @@ func (c *IMAPClient) FetchMessage(folder, id string, includeRaw bool) (Message, 
 		return Message{}, err
 	}
 	item := "BODY.PEEK[HEADER]"
-	if includeRaw {
+	if opts.IncludeRaw {
 		item = "BODY.PEEK[]"
 	}
 	resp, err := c.command("UID FETCH %s (UID FLAGS INTERNALDATE RFC822.SIZE %s)", id, item)
 	if err != nil {
-		logging.Error("imap_fetch_failed", "folder", folder, "id", id, "include_raw", includeRaw, "error", err.Error())
+		logging.Error("imap_fetch_failed", "folder", folder, "id", id, "include_raw", opts.IncludeRaw, "error", err.Error())
 		return Message{}, output.Remote("imap_fetch_failed", "failed to fetch mail message", err.Error())
 	}
-	msg := parseFetch(folder, id, resp, includeRaw)
+	msg := parseFetch(folder, id, resp, opts)
 	if msg.ID == "" {
 		msg.ID = id
 	}
-	if includeRaw && msg.Raw != "" {
+	if opts.IncludeRaw && msg.Raw != "" {
 		parsed, err := netmail.ReadMessage(strings.NewReader(msg.Raw))
 		if err == nil {
 			body, _ := io.ReadAll(parsed.Body)
 			msg.Headers = map[string][]string(parsed.Header)
 			msg.Body = string(body)
-			applyHeaders(&msg.MessageSummary, parsed.Header)
+			applyHeaders(&msg.MessageSummary, parsed.Header, opts.RawHeaders)
 		}
 	}
-	logging.Info("imap_message_fetched", "folder", folder, "id", id, "include_raw", includeRaw, "raw_bytes", len(msg.Raw), "body_bytes", len(msg.Body))
+	logging.Info("imap_message_fetched", "folder", folder, "id", id, "include_raw", opts.IncludeRaw, "raw_bytes", len(msg.Raw), "body_bytes", len(msg.Body))
 	return msg, nil
 }
 
@@ -505,7 +515,7 @@ func parseSearch(line string) []string {
 	return out
 }
 
-func parseFetch(folder, fallbackID string, resp imapResponse, includeRaw bool) Message {
+func parseFetch(folder, fallbackID string, resp imapResponse, opts FetchOptions) Message {
 	msg := Message{MessageSummary: MessageSummary{ID: fallbackID, Folder: folder}}
 	for _, line := range resp.Lines {
 		if strings.Contains(line, "FETCH") {
@@ -521,26 +531,36 @@ func parseFetch(folder, fallbackID string, resp imapResponse, includeRaw bool) M
 	}
 	if len(resp.Literals) > 0 {
 		raw := resp.Literals[len(resp.Literals)-1]
-		if includeRaw {
+		if opts.IncludeRaw {
 			msg.Raw = raw
 		}
 		if parsed, err := netmail.ReadMessage(bytes.NewBufferString(raw)); err == nil {
-			applyHeaders(&msg.MessageSummary, parsed.Header)
+			applyHeaders(&msg.MessageSummary, parsed.Header, opts.RawHeaders)
 		}
 	}
 	return msg
 }
 
-func applyHeaders(summary *MessageSummary, header netmail.Header) {
-	summary.Subject = header.Get("Subject")
-	summary.From = header.Get("From")
-	summary.Date = header.Get("Date")
+func applyHeaders(summary *MessageSummary, header netmail.Header, includeRaw bool) {
+	rawSubject := header.Get("Subject")
+	rawFrom := header.Get("From")
+	rawTo := header.Get("To")
+	rawDate := header.Get("Date")
+	summary.Subject = decodeHeaderValue(rawSubject)
+	summary.From = decodeHeaderValue(rawFrom)
+	summary.Date = rawDate
 	summary.MessageID = header.Get("Message-Id")
 	if summary.MessageID == "" {
 		summary.MessageID = header.Get("Message-ID")
 	}
-	if to := header.Get("To"); to != "" {
-		summary.To = splitAddressList(to)
+	if rawTo != "" {
+		summary.To = splitAddressList(rawTo)
+	}
+	if includeRaw {
+		summary.RawSubject = rawSubject
+		summary.RawFrom = rawFrom
+		summary.RawTo = rawTo
+		summary.RawDate = rawDate
 	}
 }
 
@@ -647,15 +667,54 @@ func firstSubmatch(pattern, input, fallback string) string {
 }
 
 func splitAddressList(raw string) []string {
-	addrs, err := netmail.ParseAddressList(raw)
+	decoded := decodeHeaderValue(raw)
+	addrs, err := netmail.ParseAddressList(decoded)
 	if err != nil {
-		return []string{raw}
+		return []string{decoded}
 	}
 	out := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
-		out = append(out, addr.String())
+		out = append(out, formatAddress(addr))
 	}
 	return out
+}
+
+func formatAddress(addr *netmail.Address) string {
+	if strings.TrimSpace(addr.Name) == "" {
+		return addr.Address
+	}
+	return strings.TrimSpace(addr.Name) + " <" + addr.Address + ">"
+}
+
+func decodeHeaderValue(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	decoded, err := new(mime.WordDecoder).DecodeHeader(raw)
+	if err != nil {
+		return raw
+	}
+	return decoded
+}
+
+func buildSearchCriteria(opts MessageListOptions) string {
+	var criteria []string
+	if opts.Unread {
+		criteria = append(criteria, "UNSEEN")
+	}
+	if opts.Flagged {
+		criteria = append(criteria, "FLAGGED")
+	}
+	if strings.TrimSpace(opts.Since) != "" {
+		criteria = append(criteria, "SINCE "+strings.TrimSpace(opts.Since))
+	}
+	if strings.TrimSpace(opts.From) != "" {
+		criteria = append(criteria, "FROM "+quote(strings.TrimSpace(opts.From)))
+	}
+	if len(criteria) == 0 {
+		return "ALL"
+	}
+	return strings.Join(criteria, " ")
 }
 
 func looksLikeIMAPCriteria(query string) bool {

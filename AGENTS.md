@@ -1,21 +1,23 @@
 <claude-mem-context>
 # Memory Context
 
-# [icloud-cli] recent context, 2026-06-13 8:23am PDT
+# [icloud-cli] recent context, 2026-06-14 8:03am PDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 3 obs (1,185t read) | 68,412t work | 98% savings
+Stats: 4 obs (1,561t read) | 77,541t work | 98% savings
 
 ### Jun 8, 2026
 548 4:05p ⚖️ iCloud Go CLI Tool: Project Concept Defined for Agentic AI Use
 ### Jun 12, 2026
 555 5:04p 🟣 iCloud CLI v1.0.1 Released to GitHub
 556 " ✅ GitHub Actions Workflow Opted Into Node.js 24
+### Jun 13, 2026
+557 8:24a ⚖️ iCloud CLI: Logging System Design — Environment-Variable-Driven with File Rotation
 
-Access 68k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 78k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
 
 # Agent Guidance
@@ -51,6 +53,10 @@ Logging is environment-configured with safe defaults:
 - `ICLOUD_CLI_LOG_SIZE` defaults to `10` MB and `ICLOUD_CLI_LOG_NUM` defaults to `3`.
 
 Use `icloud log status` to inspect the effective logging configuration. Logs should be detailed operational metadata only; never log app passwords, auth headers, SMTP auth payloads, Apple ID values, message bodies, raw RFC822, vCards, iCalendar payloads, mail subjects, event summaries, or contact names.
+
+CLI output is JSON by default, and `--json` is accepted on every command as a no-op for automation consistency. Nested `--help` should return a successful JSON help envelope and exit 0 without requiring credentials or network access.
+
+Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
 
 When testing in this sandbox, keep Go's build cache inside the workspace:
 

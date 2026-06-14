@@ -2,12 +2,18 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/aaronfaby/icloud-cli/internal/config"
+	"github.com/aaronfaby/icloud-cli/internal/icloud/webdav"
 	"github.com/aaronfaby/icloud-cli/internal/logging"
 	"github.com/aaronfaby/icloud-cli/internal/output"
 )
@@ -25,6 +31,62 @@ func TestServicesListJSON(t *testing.T) {
 	}
 	if !env.OK || env.Service != "services" || env.Operation != "list" {
 		t.Fatalf("unexpected envelope: %#v", env)
+	}
+}
+
+func TestJSONFlagIsNoOpBeforeOrAfterCommand(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
+	for _, args := range [][]string{
+		{"services", "list", "--json"},
+		{"--json", "services", "list"},
+	} {
+		var stdout bytes.Buffer
+		code := Run(args, strings.NewReader(""), &stdout, &bytes.Buffer{})
+		if code != output.ExitOK {
+			t.Fatalf("args %v exit code = %d, output = %s", args, code, stdout.String())
+		}
+		var env output.Envelope
+		if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if !env.OK || env.Service != "services" || env.Operation != "list" {
+			t.Fatalf("args %v unexpected envelope: %#v", args, env)
+		}
+	}
+}
+
+func TestNestedHelpExitsOKWithoutCredentials(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
+	t.Setenv("ICLOUD_APPLE_ID", "")
+	t.Setenv("ICLOUD_APP_PASSWORD", "")
+	var stdout bytes.Buffer
+	code := Run([]string{"mail", "messages", "get", "--help"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+	var env struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Usage string `json:"usage"`
+			Flags []struct {
+				Name string `json:"name"`
+			} `json:"flags"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK || env.Data.Usage != "icloud mail messages get [flags]" {
+		t.Fatalf("unexpected help envelope: %#v", env)
+	}
+	var sawID bool
+	for _, flag := range env.Data.Flags {
+		if flag.Name == "id" {
+			sawID = true
+		}
+	}
+	if !sawID {
+		t.Fatalf("help flags missing id: %#v", env.Data.Flags)
 	}
 }
 
@@ -191,6 +253,78 @@ func TestBuildCalendarDataRequiresStructuredFields(t *testing.T) {
 	}
 	if _, err := buildCalendarData(eventInput{Summary: "Planning", Start: "2026-06-09T10:00:00Z"}); err == nil {
 		t.Fatal("expected missing time error")
+	}
+}
+
+func TestParseMailSince(t *testing.T) {
+	now := func() time.Time {
+		return time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	}
+	tests := map[string]string{
+		"24h":                  "13-Jun-2026",
+		"2026-06-12":           "12-Jun-2026",
+		"2026-06-12T23:00:00Z": "12-Jun-2026",
+	}
+	for input, want := range tests {
+		got, err := parseMailSince(input, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("parseMailSince(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if _, err := parseMailSince("last week", now); err == nil {
+		t.Fatal("expected invalid since error")
+	}
+}
+
+func TestResolveCalendarName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch r.URL.Path {
+		case "/.well-known/caldav":
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/.well-known/caldav</D:href>
+    <D:propstat><D:prop><D:current-user-principal><D:href>/principal/</D:href></D:current-user-principal></D:prop></D:propstat>
+  </D:response>
+</D:multistatus>`))
+		case "/principal/":
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:response>
+    <D:href>/principal/</D:href>
+    <D:propstat><D:prop><C:calendar-home-set><D:href>/calendars/</D:href></C:calendar-home-set></D:prop></D:propstat>
+  </D:response>
+</D:multistatus>`))
+		case "/calendars/":
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response><D:href>/calendars/work/</D:href><D:propstat><D:prop><D:displayname>Work</D:displayname></D:prop></D:propstat></D:response>
+  <D:response><D:href>/calendars/aristotle-a/</D:href><D:propstat><D:prop><D:displayname>Aristotle</D:displayname></D:prop></D:propstat></D:response>
+  <D:response><D:href>/calendars/aristotle-b/</D:href><D:propstat><D:prop><D:displayname>aristotle</D:displayname></D:prop></D:propstat></D:response>
+</D:multistatus>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := webdav.New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	href, err := resolveCalendarName(context.Background(), client, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if href != "/calendars/work/" {
+		t.Fatalf("href = %q", href)
+	}
+	if _, err := resolveCalendarName(context.Background(), client, "Aristotle"); err == nil {
+		t.Fatal("expected ambiguous calendar error")
+	}
+	if _, err := resolveCalendarName(context.Background(), client, "Missing"); err == nil {
+		t.Fatal("expected missing calendar error")
 	}
 }
 
