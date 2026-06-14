@@ -55,6 +55,18 @@ func TestChooseSentFolderFallsBackToName(t *testing.T) {
 	}
 }
 
+func TestChooseDraftFolder(t *testing.T) {
+	if got := chooseDraftFolder([]Folder{{Name: "Draft Mail", Flags: []string{`\Drafts`}}}, ""); got != "Draft Mail" {
+		t.Fatalf("draft folder = %q, want flagged folder", got)
+	}
+	if got := chooseDraftFolder([]Folder{{Name: "Drafts"}}, ""); got != "Drafts" {
+		t.Fatalf("draft folder = %q, want named folder", got)
+	}
+	if got := chooseDraftFolder(nil, "Custom Drafts"); got != "Custom Drafts" {
+		t.Fatalf("draft folder = %q, want explicit folder", got)
+	}
+}
+
 func TestParseFolderHandlesEscapedAndUnicodeNames(t *testing.T) {
 	tests := []struct {
 		name string
@@ -135,7 +147,7 @@ func TestParseFetchDecodesMimeHeaders(t *testing.T) {
 			`* 1 FETCH (UID 55 FLAGS () RFC822.SIZE 100 BODY[HEADER] {100}`,
 			`A0001 OK Fetch completed`,
 		},
-		Literals: []string{"Subject: =?utf-8?B?5pel5pys6Kqe?=\r\nFrom: =?utf-8?B?5bed5LiK?= <sender@example.com>\r\nTo: =?utf-8?B?5Y+X5L+h6ICF?= <to@example.com>\r\nDate: Sun, 14 Jun 2026 10:00:00 -0700\r\n\r\n"},
+		Literals: []string{"Subject: =?utf-8?B?5pel5pys6Kqe?=\r\nFrom: =?utf-8?B?5bed5LiK?= <sender@example.com>\r\nTo: =?utf-8?B?5Y+X5L+h6ICF?= <to@example.com>\r\nCc: cc@example.com\r\nReply-To: reply@example.com\r\nReferences: <root@example.com>\r\nDate: Sun, 14 Jun 2026 10:00:00 -0700\r\n\r\n"},
 	}, FetchOptions{RawHeaders: true})
 	if msg.Subject != "日本語" || msg.RawSubject != "=?utf-8?B?5pel5pys6Kqe?=" {
 		t.Fatalf("subject = %q raw = %q", msg.Subject, msg.RawSubject)
@@ -145,6 +157,9 @@ func TestParseFetchDecodesMimeHeaders(t *testing.T) {
 	}
 	if len(msg.To) != 1 || msg.To[0] != "受信者 <to@example.com>" || msg.RawTo == "" || msg.RawDate == "" {
 		t.Fatalf("to/raw = %#v raw_to=%q raw_date=%q", msg.To, msg.RawTo, msg.RawDate)
+	}
+	if len(msg.CC) != 1 || msg.CC[0] != "cc@example.com" || len(msg.ReplyTo) != 1 || msg.ReplyTo[0] != "reply@example.com" || msg.References != "<root@example.com>" {
+		t.Fatalf("cc/reply-to/references = %#v %#v %q", msg.CC, msg.ReplyTo, msg.References)
 	}
 }
 
@@ -237,6 +252,86 @@ func TestSetFlagCommands(t *testing.T) {
 		`A0004 UID STORE 123 -FLAGS.SILENT (\Seen)`,
 	}
 	assertCommands(t, commands, want)
+}
+
+func TestResponseSourceFlagCommands(t *testing.T) {
+	client, commands := newScriptedIMAPClient(t, []string{
+		`* 1 EXISTS`,
+		`A0001 OK SELECT completed`,
+		`A0002 OK STORE completed`,
+		`* 1 EXISTS`,
+		`A0003 OK SELECT completed`,
+		`A0004 OK STORE completed`,
+	})
+	defer client.conn.Close()
+
+	if err := client.SetFlag("INBOX", "123", `\Answered`, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetFlag("INBOX", "123", `$Forwarded`, true); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`A0001 SELECT "INBOX"`,
+		`A0002 UID STORE 123 +FLAGS.SILENT (\Answered)`,
+		`A0003 SELECT "INBOX"`,
+		`A0004 UID STORE 123 +FLAGS.SILENT ($Forwarded)`,
+	}
+	assertCommands(t, commands, want)
+}
+
+func TestAppendDraftUsesDraftFlag(t *testing.T) {
+	server, clientConn := net.Pipe()
+	commands := make(chan string, 2)
+	go func() {
+		defer close(commands)
+		defer server.Close()
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		commands <- line
+		tag := strings.Fields(line)[0]
+		_, _ = server.Write([]byte(`* LIST (\Drafts) "/" "Drafts"` + "\r\n" + tag + " OK LIST completed\r\n"))
+
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		commands <- line
+		tag = strings.Fields(line)[0]
+		_, _ = server.Write([]byte("+ Ready\r\n"))
+		if n, ok := literalSize(line); ok {
+			buf := make([]byte, n+2)
+			_, _ = reader.Read(buf)
+		}
+		_, _ = server.Write([]byte(tag + " OK APPEND completed\r\n"))
+	}()
+	client := &IMAPClient{
+		conn: clientConn,
+		r:    bufio.NewReader(clientConn),
+		w:    bufio.NewWriter(clientConn),
+	}
+	defer client.conn.Close()
+
+	result, err := AppendDraft(client, SendRequest{From: "me@example.com", To: []string{"you@example.com"}, Subject: "draft", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["folder"] != "Drafts" {
+		t.Fatalf("result = %#v", result)
+	}
+	got := []string{<-commands, <-commands}
+	if got[0] != `A0001 LIST "" "*"` {
+		t.Fatalf("list command = %q", got[0])
+	}
+	if !strings.Contains(got[1], `APPEND "Drafts" (\Draft)`) {
+		t.Fatalf("append command = %q", got[1])
+	}
 }
 
 func TestFetchMessageRawUsesBodyPeek(t *testing.T) {

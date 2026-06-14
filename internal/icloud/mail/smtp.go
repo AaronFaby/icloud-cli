@@ -78,6 +78,25 @@ func appendSentCopy(cfg config.Config, msg []byte) map[string]any {
 	return map[string]any{"ok": true, "folder": folder}
 }
 
+func AppendDraft(client *IMAPClient, req SendRequest) (map[string]any, error) {
+	msg, err := buildMessage(req)
+	if err != nil {
+		return nil, err
+	}
+	folders, err := client.ListFolders()
+	if err != nil {
+		logging.Warn("draft_folder_list_failed", "error", err.Error())
+		return nil, err
+	}
+	folder := chooseDraftFolder(folders, "")
+	if err := client.AppendMessage(folder, []string{`\Draft`}, time.Now(), msg); err != nil {
+		logging.Warn("draft_append_failed", "folder", folder, "error", err.Error())
+		return nil, err
+	}
+	logging.Info("draft_append_success", "folder", folder, "bytes", len(msg))
+	return map[string]any{"ok": true, "folder": folder}, nil
+}
+
 func sendMailTLS(addr string, username string, password string, from string, to []string, msg []byte) error {
 	start := time.Now()
 	logging.Info("smtp_connect_start", "host", addr)

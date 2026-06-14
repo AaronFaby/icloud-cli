@@ -337,11 +337,93 @@ func (a app) mailMessages(args []string) (any, error) {
 			return nil, err
 		}
 		return mail.Send(cfg, req)
+	case "reply", "reply-all", "forward":
+		return a.mailMessageResponse(args)
 	case "move", "copy", "delete", "archive", "flag", "unflag", "mark-read", "mark-unread":
 		return a.singleMailMutation(args)
 	default:
 		return nil, output.Validation("unknown_mail_message_command", "unknown mail messages command", map[string]string{"command": args[0]})
 	}
+}
+
+func (a app) mailMessageResponse(args []string) (any, error) {
+	op := args[0]
+	fs := newFlagSet("mail messages " + op)
+	configPath := fs.String("config", "", "config path")
+	folder := fs.String("folder", "INBOX", "folder")
+	id := fs.String("id", "", "message UID")
+	inputJSON := fs.String("input-json", "", "JSON request or @path")
+	dryRun := fs.Bool("dry-run", false, "preview without sending or saving")
+	draft := fs.Bool("draft", false, "save composed message to Drafts instead of sending")
+	if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+		return help, err
+	}
+	if strings.TrimSpace(*id) == "" {
+		return nil, output.Validation("missing_message_id", "message id is required", nil)
+	}
+	cfg, _, err := config.RequireCredentials(*configPath)
+	if err != nil {
+		return nil, err
+	}
+	var input mail.ResponseInput
+	if err := a.decodeInput(*inputJSON, &input); err != nil {
+		return nil, err
+	}
+	client, err := a.imapClient(*configPath)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	source, err := client.FetchMessageWithOptions(*folder, *id, mail.FetchOptions{IncludeRaw: true, RawHeaders: true})
+	if err != nil {
+		return nil, err
+	}
+	action := "send"
+	if *draft {
+		action = "create_draft"
+	}
+	prepared, err := mail.PrepareResponse(cfg, source, mail.ResponseKind(op), input, action)
+	if err != nil {
+		return nil, err
+	}
+	if *dryRun {
+		return prepared, nil
+	}
+	if *draft {
+		draftResult, err := mail.AppendDraft(client, prepared.Request)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"action":        prepared.Action,
+			"from":          prepared.From,
+			"to":            prepared.To,
+			"cc":            prepared.CC,
+			"bcc_count":     len(prepared.BCC),
+			"subject":       prepared.Subject,
+			"headers":       prepared.Headers,
+			"source_folder": prepared.SourceFolder,
+			"source_id":     prepared.SourceID,
+			"draft":         draftResult,
+		}, nil
+	}
+	sendResult, err := mail.Send(cfg, prepared.Request)
+	if err != nil {
+		return nil, err
+	}
+	sourceFlag := map[string]any{"ok": true, "flag": prepared.SourceFlag}
+	if prepared.SourceFlag != "" {
+		if err := client.SetFlag(prepared.SourceFolder, prepared.SourceID, prepared.SourceFlag, true); err != nil {
+			sourceFlag["ok"] = false
+			sourceFlag["error"] = err.Error()
+		}
+	}
+	sendResult["action"] = prepared.Action
+	sendResult["headers"] = prepared.Headers
+	sendResult["source_folder"] = prepared.SourceFolder
+	sendResult["source_id"] = prepared.SourceID
+	sendResult["source_flag"] = sourceFlag
+	return sendResult, nil
 }
 
 func (a app) singleMailMutation(args []string) (any, error) {

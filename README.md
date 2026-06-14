@@ -1,15 +1,26 @@
 # iCloud CLI
 
-`icloud` is a Go CLI for agentic access to Apple iCloud services through documented, app-password-compatible protocols.
+`icloud` is a Go CLI for agentic access to Apple iCloud services through documented, app-password-compatible protocols. It is built for automation environments where predictable JSON, noninteractive auth, and a small portable binary matter more than a graphical client experience.
+
+## Purpose
+
+This project exists to give agents, scripts, and containerized jobs a narrow, inspectable way to work with iCloud data without browser automation or private iCloud web sessions. The design goals are:
+
+- Agentic use: every command is noninteractive, JSON-first, and suitable for tool-calling loops that need stable output envelopes and exit codes.
+- Documented protocols: Mail uses IMAP/SMTP, Calendar uses CalDAV, and Contacts uses CardDAV. Unsupported services return structured explanations instead of silently reaching for private APIs.
+- Standard interfaces only: the project only supports iCloud features exposed through standard protocols. It will not add scraping, browser-session reuse, private endpoint reverse engineering, or other hacks to reach iCloud Drive, Photos, Notes, Reminders, or any other iCloud area without a standardized interface.
+- Reduced supply-chain surface: the CLI is written in Go with no third-party Go module dependencies, which keeps builds easier to audit and limits dependency-driven supply-chain risk.
+- Container portability: credentials can be supplied entirely through environment variables, logs stay outside stdout, and release binaries are published for Linux and macOS targets.
+- Automation safety: destructive operations require explicit flags where appropriate, live workflows can use dry-runs and drafts, and logs intentionally avoid user content and secrets.
 
 V1 supports:
 
-- Mail over IMAP/SMTP.
-- Calendar discovery and event CRUD over CalDAV.
+- Mail over IMAP/SMTP, including message triage filters, decoded headers, send with Sent-copy append, reply/reply-all/forward, Drafts append, flags, read state, and move/copy/delete/archive mutations.
+- Calendar discovery and event CRUD over CalDAV, including calendar lookup by display name.
 - Contacts address-book discovery and contact CRUD over CardDAV.
 - Capability reporting for unsupported iCloud services such as Drive, Notes, Reminders, and Photos.
 
-The CLI is JSON-first and noninteractive. Missing credentials, validation errors, unsupported services, and remote failures all return structured JSON plus stable exit codes.
+Missing credentials, validation errors, unsupported services, and remote failures all return structured JSON plus stable exit codes.
 
 ## Status
 
@@ -25,7 +36,7 @@ Download prebuilt binaries from the [GitHub releases page](https://github.com/Aa
 
 ## Credentials
 
-Environment variables are preferred for containers and agents:
+Environment variables are preferred for containers, CI jobs, and agents because they avoid writing credentials to disk:
 
 ```sh
 export ICLOUD_APPLE_ID="name@example.com"
@@ -85,6 +96,8 @@ Logs include operational metadata such as command lifecycle, timings, remote sta
 
 ## Examples
 
+The examples below show the common automation surface. They are intentionally shell- and JSON-friendly so the same commands can be used from local scripts, containers, or agent tools.
+
 ```sh
 icloud services list
 icloud auth check
@@ -94,6 +107,9 @@ icloud mail messages list --folder INBOX --limit 10
 icloud mail messages list --folder INBOX --unread --since 24h --from domain.com --flagged --limit 10
 icloud mail messages search --folder INBOX --query 'FROM "alerts@example.com"'
 icloud mail messages get --folder INBOX --id 123 --raw
+icloud mail messages reply --folder INBOX --id 123 --input-json '{"text":"Thanks"}'
+icloud mail messages reply-all --folder INBOX --id 123 --input-json '{"text":"Thanks"}'
+icloud mail messages forward --folder INBOX --id 123 --input-json '{"to":["person@example.com"],"text":"FYI"}'
 ```
 
 All commands emit the JSON envelope by default. `--json` is accepted on every command as a no-op for automation that passes it consistently.
@@ -111,6 +127,8 @@ icloud mail messages send --input-json '{
 ```
 
 Successful sends are accepted by SMTP and then copied to the detected Sent mailbox over IMAP. If SMTP succeeds but saving the sent copy fails, the command reports `sent_copy.ok=false` instead of retrying the send.
+
+Reply, reply-all, and forward compose text-threaded messages from a source message. Replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, and actual sends use the same Sent-copy behavior as `messages send`. Pass `--dry-run` to preview recipients, subject, headers, and intended flags without sending or saving; pass `--draft` to append the composed message to Drafts instead of sending. This surface does not preserve attachments or render HTML quotes.
 
 Move a message:
 

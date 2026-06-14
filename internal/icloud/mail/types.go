@@ -15,9 +15,12 @@ type MessageSummary struct {
 	RawFrom      string   `json:"raw_from,omitempty"`
 	To           []string `json:"to,omitempty"`
 	RawTo        string   `json:"raw_to,omitempty"`
+	CC           []string `json:"cc,omitempty"`
+	ReplyTo      []string `json:"reply_to,omitempty"`
 	Date         string   `json:"date,omitempty"`
 	RawDate      string   `json:"raw_date,omitempty"`
 	MessageID    string   `json:"message_id,omitempty"`
+	References   string   `json:"references,omitempty"`
 	Flags        []string `json:"flags,omitempty"`
 	Size         int      `json:"size,omitempty"`
 	InternalDate string   `json:"internal_date,omitempty"`
@@ -61,6 +64,31 @@ type SendRequest struct {
 	Text    string            `json:"text,omitempty"`
 	HTML    string            `json:"html,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+type ResponseInput struct {
+	From            string   `json:"from,omitempty"`
+	To              []string `json:"to,omitempty"`
+	CC              []string `json:"cc,omitempty"`
+	BCC             []string `json:"bcc,omitempty"`
+	Subject         string   `json:"subject,omitempty"`
+	Text            string   `json:"text,omitempty"`
+	IncludeOriginal *bool    `json:"include_original,omitempty"`
+}
+
+type PreparedResponse struct {
+	Action           string            `json:"action"`
+	SourceFolder     string            `json:"source_folder"`
+	SourceID         string            `json:"source_id"`
+	From             string            `json:"from"`
+	To               []string          `json:"to,omitempty"`
+	CC               []string          `json:"cc,omitempty"`
+	BCC              []string          `json:"bcc,omitempty"`
+	Subject          string            `json:"subject"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	IntendedSentCopy bool              `json:"intended_sent_copy"`
+	SourceFlag       string            `json:"source_flag,omitempty"`
+	Request          SendRequest       `json:"-"`
 }
 
 type BatchRequest struct {
