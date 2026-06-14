@@ -34,6 +34,10 @@ Release builds are produced for:
 
 Download prebuilt binaries from the [GitHub releases page](https://github.com/AaronFaby/icloud-cli/releases). Each release includes platform tarballs and matching `.sha256` files.
 
+## Agent Skill
+
+This repository includes an agent-facing skill at [`skill/icloud-cli/SKILL.md`](skill/icloud-cli/SKILL.md). Use it when an agent needs repo-specific guidance for building, testing, configuring, or operating `icloud` in automation. The skill summarizes the documented-protocol boundary, credential handling, logging rules, common commands, live-test safety expectations, and release workflow details.
+
 ## Credentials
 
 Environment variables are preferred for containers, CI jobs, and agents because they avoid writing credentials to disk:
