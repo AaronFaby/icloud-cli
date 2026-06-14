@@ -82,6 +82,11 @@ jobs:
     needs: build
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Download artifacts
         uses: actions/download-artifact@v6
         with:
@@ -93,6 +98,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             $(find release-assets -type f | sort) \
-            --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --notes-from-tag
