@@ -34,6 +34,42 @@ func TestServicesListJSON(t *testing.T) {
 	}
 }
 
+func TestServicesListIncludesResponseCommands(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
+	var stdout bytes.Buffer
+	code := Run([]string{"services", "list"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+	var env struct {
+		Data []struct {
+			Service    string   `json:"service"`
+			Operations []string `json:"operations"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	var ops []string
+	for _, service := range env.Data {
+		if service.Service == "mail" {
+			ops = service.Operations
+			break
+		}
+	}
+	for _, want := range []string{"messages:reply", "messages:reply-all", "messages:forward"} {
+		var found bool
+		for _, got := range ops {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("mail operations missing %q: %#v", want, ops)
+		}
+	}
+}
+
 func TestJSONFlagIsNoOpBeforeOrAfterCommand(t *testing.T) {
 	t.Setenv(logging.EnvLog, logging.DestinationOff)
 	for _, args := range [][]string{
@@ -87,6 +123,36 @@ func TestNestedHelpExitsOKWithoutCredentials(t *testing.T) {
 	}
 	if !sawID {
 		t.Fatalf("help flags missing id: %#v", env.Data.Flags)
+	}
+}
+
+func TestResponseHelpIncludesDraftAndDryRun(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
+	var stdout bytes.Buffer
+	code := Run([]string{"mail", "messages", "reply", "--help"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+	var env struct {
+		Data struct {
+			Flags []struct {
+				Name string `json:"name"`
+			} `json:"flags"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"draft", "dry-run", "input-json"} {
+		var found bool
+		for _, flag := range env.Data.Flags {
+			if flag.Name == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("help flags missing %q: %#v", want, env.Data.Flags)
+		}
 	}
 }
 

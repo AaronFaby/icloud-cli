@@ -22,11 +22,11 @@ Access 78k tokens of past work via get_observations([IDs]) or mem-search skill.
 
 # Agent Guidance
 
-This repo contains a Go CLI named `icloud` for noninteractive, JSON-first iCloud automation.
+This repo contains a Go CLI named `icloud` for noninteractive, JSON-first iCloud automation. The tool is optimized for agentic use, container portability, documented-protocol access, and a small auditable supply-chain surface; the current Go module intentionally has no third-party module dependencies.
 
 The v1.0 surface covers:
 
-- Mail over IMAP/SMTP, including folder/message listing, search/get, send with Sent-copy append, move/copy/delete/archive, flags, read state, and batch mutations.
+- Mail over IMAP/SMTP, including folder/message listing, search/get, send with Sent-copy append, text-threaded reply/reply-all/forward, Drafts append, move/copy/delete/archive, flags, read state, and batch mutations.
 - Calendar discovery and event CRUD over CalDAV.
 - Contacts address-book discovery and contact CRUD over CardDAV.
 - Capability reporting for unsupported services.
@@ -56,7 +56,7 @@ Use `icloud log status` to inspect the effective logging configuration. Logs sho
 
 CLI output is JSON by default, and `--json` is accepted on every command as a no-op for automation consistency. Nested `--help` should return a successful JSON help envelope and exit 0 without requiring credentials or network access.
 
-Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
+Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. Reply, reply-all, and forward preserve text-threading headers for replies, use `Fwd:` subject handling for forwards, support `--dry-run` metadata previews, and support `--draft` Drafts append. Actual reply/reply-all/forward sends must continue to append a Sent copy. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
 
 When testing in this sandbox, keep Go's build cache inside the workspace:
 

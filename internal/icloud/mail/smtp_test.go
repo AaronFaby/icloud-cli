@@ -69,6 +69,37 @@ func TestBuildMessageIgnoresProtectedHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildMessageAllowsThreadingHeaders(t *testing.T) {
+	msg, err := buildMessage(SendRequest{
+		From:    "sender@example.com",
+		To:      []string{"one@example.com"},
+		Subject: "reply",
+		Text:    "body",
+		Headers: map[string]string{
+			"Message-ID":   "<new@example.com>",
+			"In-Reply-To":  "<source@example.com>",
+			"References":   "<root@example.com> <source@example.com>",
+			"MIME-Version": "spoof",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(msg)
+	for _, want := range []string{
+		"Message-ID: <new@example.com>\r\n",
+		"In-Reply-To: <source@example.com>\r\n",
+		"References: <root@example.com> <source@example.com>\r\n",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("message missing %q in:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "MIME-Version: spoof") {
+		t.Fatalf("message accepted MIME-Version override: %s", raw)
+	}
+}
+
 func TestBuildMessageCreatesMultipartAlternative(t *testing.T) {
 	msg, err := buildMessage(SendRequest{
 		From:    "sender@example.com",

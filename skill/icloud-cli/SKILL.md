@@ -7,6 +7,16 @@ description: Use when an agent needs to build, test, configure, or operate this 
 
 Use this skill when working with this repository's `icloud` Go CLI.
 
+## Project Purpose
+
+This CLI is designed for agentic and scripted iCloud automation, not as a general desktop mail/calendar/contact client. Preserve these product constraints when changing behavior or docs:
+
+- Keep commands noninteractive, JSON-first, and predictable for tool-calling loops.
+- Prefer environment-driven configuration so the binary works cleanly in containers, CI jobs, and ephemeral agent sandboxes.
+- Use documented protocols only unless the user explicitly approves private iCloud API work.
+- Keep the supply-chain surface small. The current Go module has no third-party module dependencies; adding one should have a clear payoff and be called out in review.
+- Keep stdout reserved for command JSON. Diagnostics and logs must go to stderr or the configured log file.
+
 ## Core Rules
 
 - Use documented protocols by default: Mail via IMAP/SMTP, Calendar via CalDAV, Contacts via CardDAV.
@@ -92,6 +102,9 @@ icloud mail messages list --folder INBOX --limit 10
 icloud mail messages list --folder INBOX --unread --since 24h --from domain.com --flagged --limit 10
 icloud mail messages search --folder INBOX --query 'FROM "alerts@example.com"'
 icloud mail messages get --folder INBOX --id 123 --raw
+icloud mail messages reply --folder INBOX --id 123 --input-json '{"text":"Thanks"}'
+icloud mail messages reply-all --folder INBOX --id 123 --input-json '{"text":"Thanks"}'
+icloud mail messages forward --folder INBOX --id 123 --input-json '{"to":["person@example.com"],"text":"FYI"}'
 icloud mail messages move --folder INBOX --id 123 --to-folder Archive
 icloud mail messages delete --folder INBOX --id 123
 icloud mail batch flag --input-json '{"folder":"INBOX","ids":["123","124"]}'
@@ -100,6 +113,8 @@ icloud mail batch flag --input-json '{"folder":"INBOX","ids":["123","124"]}'
 Mail behavior notes:
 
 - Send uses SMTP and saves a copy to the detected Sent mailbox over IMAP.
+- Reply, reply-all, and forward are text-threading commands; replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, actual sends preserve Sent-copy behavior, `--dry-run` previews metadata without mutation, and `--draft` appends to Drafts without sending.
+- Reply, reply-all, and forward do not provide full MIME composition; do not imply HTML-aware quoting or attachment forwarding unless that feature is added later.
 - Delete moves to the detected `\Trash` mailbox by default; permanent delete requires `--permanent`.
 - Message summary headers are decoded by default; `messages list --raw-headers` preserves raw subject/from/to/date fields.
 - `messages get` includes parsed IMAP flags when the server returns them.

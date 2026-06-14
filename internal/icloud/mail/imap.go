@@ -545,16 +545,25 @@ func applyHeaders(summary *MessageSummary, header netmail.Header, includeRaw boo
 	rawSubject := header.Get("Subject")
 	rawFrom := header.Get("From")
 	rawTo := header.Get("To")
+	rawCC := header.Get("Cc")
+	rawReplyTo := header.Get("Reply-To")
 	rawDate := header.Get("Date")
 	summary.Subject = decodeHeaderValue(rawSubject)
 	summary.From = decodeHeaderValue(rawFrom)
 	summary.Date = rawDate
+	summary.References = strings.TrimSpace(header.Get("References"))
 	summary.MessageID = header.Get("Message-Id")
 	if summary.MessageID == "" {
 		summary.MessageID = header.Get("Message-ID")
 	}
 	if rawTo != "" {
 		summary.To = splitAddressList(rawTo)
+	}
+	if rawCC != "" {
+		summary.CC = splitAddressList(rawCC)
+	}
+	if rawReplyTo != "" {
+		summary.ReplyTo = splitAddressList(rawReplyTo)
 	}
 	if includeRaw {
 		summary.RawSubject = rawSubject
@@ -790,6 +799,26 @@ func chooseSentFolder(folders []Folder, requested string) string {
 		}
 	}
 	return "Sent"
+}
+
+func chooseDraftFolder(folders []Folder, requested string) string {
+	if strings.TrimSpace(requested) != "" {
+		return requested
+	}
+	for _, folder := range folders {
+		for _, flag := range folder.Flags {
+			if strings.EqualFold(flag, `\Drafts`) || strings.EqualFold(flag, `\Draft`) {
+				return folder.Name
+			}
+		}
+	}
+	for _, folder := range folders {
+		name := strings.ToLower(folder.Name)
+		if name == "drafts" || name == "draft" || strings.Contains(name, "draft") {
+			return folder.Name
+		}
+	}
+	return "Drafts"
 }
 
 func redactIMAPError(s string) string {
