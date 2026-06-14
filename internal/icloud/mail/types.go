@@ -10,13 +10,32 @@ type MessageSummary struct {
 	ID           string   `json:"id"`
 	Folder       string   `json:"folder"`
 	Subject      string   `json:"subject,omitempty"`
+	RawSubject   string   `json:"raw_subject,omitempty"`
 	From         string   `json:"from,omitempty"`
+	RawFrom      string   `json:"raw_from,omitempty"`
 	To           []string `json:"to,omitempty"`
+	RawTo        string   `json:"raw_to,omitempty"`
 	Date         string   `json:"date,omitempty"`
+	RawDate      string   `json:"raw_date,omitempty"`
 	MessageID    string   `json:"message_id,omitempty"`
 	Flags        []string `json:"flags,omitempty"`
 	Size         int      `json:"size,omitempty"`
 	InternalDate string   `json:"internal_date,omitempty"`
+}
+
+type MessageListOptions struct {
+	Folder     string
+	Limit      int
+	Unread     bool
+	Flagged    bool
+	From       string
+	Since      string
+	RawHeaders bool
+}
+
+type FetchOptions struct {
+	IncludeRaw bool
+	RawHeaders bool
 }
 
 type Message struct {

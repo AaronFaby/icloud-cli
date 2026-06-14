@@ -107,7 +107,7 @@ func TestParseFetchReadsFlagsFromContinuationLine(t *testing.T) {
 			`A0001 OK Fetch completed`,
 		},
 		Literals: []string{"Subject: x\r\n\r\n"},
-	}, false)
+	}, FetchOptions{})
 	if msg.ID != "183860" {
 		t.Fatalf("id = %q", msg.ID)
 	}
@@ -123,9 +123,54 @@ func TestParseFetchHandlesMissingHeaders(t *testing.T) {
 			`A0001 OK Fetch completed`,
 		},
 		Literals: []string{"\r\n\r\n"},
-	}, false)
+	}, FetchOptions{})
 	if msg.ID != "55" || msg.Folder != "INBOX" || msg.Subject != "" || msg.From != "" {
 		t.Fatalf("message = %#v", msg)
+	}
+}
+
+func TestParseFetchDecodesMimeHeaders(t *testing.T) {
+	msg := parseFetch("INBOX", "55", imapResponse{
+		Lines: []string{
+			`* 1 FETCH (UID 55 FLAGS () RFC822.SIZE 100 BODY[HEADER] {100}`,
+			`A0001 OK Fetch completed`,
+		},
+		Literals: []string{"Subject: =?utf-8?B?5pel5pys6Kqe?=\r\nFrom: =?utf-8?B?5bed5LiK?= <sender@example.com>\r\nTo: =?utf-8?B?5Y+X5L+h6ICF?= <to@example.com>\r\nDate: Sun, 14 Jun 2026 10:00:00 -0700\r\n\r\n"},
+	}, FetchOptions{RawHeaders: true})
+	if msg.Subject != "日本語" || msg.RawSubject != "=?utf-8?B?5pel5pys6Kqe?=" {
+		t.Fatalf("subject = %q raw = %q", msg.Subject, msg.RawSubject)
+	}
+	if msg.From != "川上 <sender@example.com>" || msg.RawFrom == "" {
+		t.Fatalf("from = %q raw = %q", msg.From, msg.RawFrom)
+	}
+	if len(msg.To) != 1 || msg.To[0] != "受信者 <to@example.com>" || msg.RawTo == "" || msg.RawDate == "" {
+		t.Fatalf("to/raw = %#v raw_to=%q raw_date=%q", msg.To, msg.RawTo, msg.RawDate)
+	}
+}
+
+func TestParseFetchOmitsRawHeadersByDefault(t *testing.T) {
+	msg := parseFetch("INBOX", "55", imapResponse{
+		Lines:    []string{`* 1 FETCH (UID 55 FLAGS () RFC822.SIZE 10 BODY[HEADER] {10}`, `A0001 OK Fetch completed`},
+		Literals: []string{"Subject: =?utf-8?B?5pel5pys6Kqe?=\r\n\r\n"},
+	}, FetchOptions{})
+	if msg.Subject != "日本語" || msg.RawSubject != "" {
+		t.Fatalf("message = %#v", msg)
+	}
+}
+
+func TestBuildSearchCriteriaForListFilters(t *testing.T) {
+	got := buildSearchCriteria(MessageListOptions{
+		Unread:  true,
+		Flagged: true,
+		Since:   "13-Jun-2026",
+		From:    "domain.com",
+	})
+	want := `UNSEEN FLAGGED SINCE 13-Jun-2026 FROM "domain.com"`
+	if got != want {
+		t.Fatalf("criteria = %q, want %q", got, want)
+	}
+	if got := buildSearchCriteria(MessageListOptions{}); got != "ALL" {
+		t.Fatalf("criteria = %q, want ALL", got)
 	}
 }
 

@@ -91,9 +91,14 @@ icloud auth check
 icloud auth doctor
 icloud mail folders list
 icloud mail messages list --folder INBOX --limit 10
+icloud mail messages list --folder INBOX --unread --since 24h --from domain.com --flagged --limit 10
 icloud mail messages search --folder INBOX --query 'FROM "alerts@example.com"'
 icloud mail messages get --folder INBOX --id 123 --raw
 ```
+
+All commands emit the JSON envelope by default. `--json` is accepted on every command as a no-op for automation that passes it consistently.
+
+Mail message summaries decode encoded headers such as RFC 2047 subjects by default. Use `--raw-headers` with `mail messages list` to include `raw_subject`, `raw_from`, `raw_to`, and `raw_date` alongside decoded fields.
 
 Send mail:
 
@@ -158,6 +163,7 @@ Calendar event CRUD:
 
 ```sh
 icloud calendar events list --calendar /123/calendars/work/ --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
+icloud calendar events list --calendar-name Aristotle --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
 icloud calendar events create --calendar /123/calendars/work/ --input-json '{
   "summary": "Planning",
   "start": "2026-06-10T17:00:00Z",
