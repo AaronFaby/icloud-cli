@@ -95,4 +95,4 @@ jobs:
             $(find release-assets -type f | sort) \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
-            --notes "iCloud CLI $GITHUB_REF_NAME release. Includes tested Mail, Calendar, and Contacts support over documented iCloud-compatible protocols."
+            --notes-from-tag
