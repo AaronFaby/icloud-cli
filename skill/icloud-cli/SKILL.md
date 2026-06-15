@@ -73,6 +73,14 @@ GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aa
 GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go build -o /private/tmp/icloud-cli ./cmd/icloud
 ```
 
+Install the released CLI with Homebrew:
+
+```sh
+brew install AaronFaby/tap/icloud
+```
+
+The Homebrew formula lives in `AaronFaby/homebrew-tap` and builds from tagged source releases. Tags matching `v*` publish binary assets from this repo; future tag releases can dispatch the tap workflow to open a formula bump pull request.
+
 For local smoke checks that do not contact iCloud:
 
 ```sh

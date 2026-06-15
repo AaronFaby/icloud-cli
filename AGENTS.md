@@ -76,4 +76,6 @@ When running live tests against iCloud, create disposable test records and clean
 
 Tags matching `v*` trigger GitHub Actions binary builds for Linux amd64, Linux arm64, and macOS arm64, and publish release assets with sha256 files.
 
+The Homebrew formula lives in the separate `AaronFaby/homebrew-tap` repository. Users install with `brew install AaronFaby/tap/icloud`; formula changes build from tagged source releases and should land through tap pull requests.
+
 Do not add private iCloud Drive, Notes, Reminders, Photos, or web-session scraping behavior without a new explicit product decision.

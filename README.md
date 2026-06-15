@@ -24,7 +24,7 @@ Missing credentials, validation errors, unsupported services, and remote failure
 
 ## Status
 
-The current release is `v1.0.3`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
+The current release is `v1.0.4`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
 
 Release builds are produced for:
 
@@ -33,6 +33,14 @@ Release builds are produced for:
 - macOS arm64
 
 Download prebuilt binaries from the [GitHub releases page](https://github.com/AaronFaby/icloud-cli/releases). Each release includes platform tarballs and matching `.sha256` files.
+
+Install with Homebrew:
+
+```sh
+brew install AaronFaby/tap/icloud
+```
+
+The Homebrew formula lives in the separate [`AaronFaby/homebrew-tap`](https://github.com/AaronFaby/homebrew-tap) repository and builds from tagged source releases.
 
 ## Agent Skill
 
