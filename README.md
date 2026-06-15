@@ -236,3 +236,7 @@ For live smoke tests, use disposable records and clean them up:
 ## Unsupported Services
 
 Apple app-specific passwords are usable with documented third-party access paths for Mail, Calendar, and Contacts. This CLI intentionally does not use private iCloud web APIs in V1. Commands for services such as Notes, iCloud Drive, Reminders, and Photos return exit code `5` with a structured JSON explanation.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).

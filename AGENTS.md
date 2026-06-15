@@ -1,13 +1,13 @@
 <claude-mem-context>
 # Memory Context
 
-# [icloud-cli] recent context, 2026-06-14 8:03am PDT
+# [icloud-cli] recent context, 2026-06-15 6:43am PDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 4 obs (1,561t read) | 77,541t work | 98% savings
+Stats: 5 obs (1,996t read) | 86,767t work | 98% savings
 
 ### Jun 8, 2026
 548 4:05p ⚖️ iCloud Go CLI Tool: Project Concept Defined for Agentic AI Use
@@ -16,8 +16,10 @@ Stats: 4 obs (1,561t read) | 77,541t work | 98% savings
 556 " ✅ GitHub Actions Workflow Opted Into Node.js 24
 ### Jun 13, 2026
 557 8:24a ⚖️ iCloud CLI: Logging System Design — Environment-Variable-Driven with File Rotation
+### Jun 14, 2026
+558 8:03a ⚖️ iCloud CLI: 5 Planned Improvements Scoped for Next Release
 
-Access 78k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 87k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
 
 # Agent Guidance
