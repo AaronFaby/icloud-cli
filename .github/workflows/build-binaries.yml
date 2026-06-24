@@ -88,9 +88,9 @@ jobs:
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v6
-        with:
-          path: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --dir release-assets
 
       - name: Create GitHub release
         env:
