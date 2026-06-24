@@ -24,11 +24,10 @@ Missing credentials, validation errors, unsupported services, and remote failure
 
 ## Status
 
-The current release is `v1.0.5`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
+The current release is `v1.0.6`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
 
 Release builds are produced for:
 
-- Linux amd64
 - Linux arm64
 - macOS arm64
 

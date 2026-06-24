@@ -23,9 +23,6 @@ jobs:
       matrix:
         include:
           - goos: linux
-            goarch: amd64
-            artifact: icloud-linux-amd64
-          - goos: linux
             goarch: arm64
             artifact: icloud-linux-arm64
           - goos: darwin
