@@ -185,6 +185,34 @@ func TestParseMessageContentFallsBackFromHTMLToText(t *testing.T) {
 	}
 }
 
+func TestParseMessageContentUsesRicherHTMLWhenPlainTextIsStub(t *testing.T) {
+	raw := strings.Join([]string{
+		"Content-Type: multipart/alternative; boundary=alt",
+		"",
+		"--alt",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"Ticketmaster",
+		"--alt",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		"<html><body><table><tr><td>Ticketmaster</td><td>Section 101</td></tr><tr><td>Row B</td><td>Seat 12</td></tr></table><p>Your mobile ticket is ready for the event. Please review entry details, venue policies, transfer options, order information, and arrival instructions before you go.</p></body></html>",
+		"--alt--",
+		"",
+	}, "\r\n")
+
+	content, err := parseMessageContent(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Text == "Ticketmaster" {
+		t.Fatalf("text stayed on stub: %q", content.Text)
+	}
+	if !strings.Contains(content.Text, "Section 101") || !strings.Contains(content.Text, "arrival instructions") {
+		t.Fatalf("text did not use rich html fallback: %q", content.Text)
+	}
+}
+
 func TestAttachmentWithContentReturnsBase64(t *testing.T) {
 	raw := strings.Join([]string{
 		"Content-Type: multipart/mixed; boundary=mix",

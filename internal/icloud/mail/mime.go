@@ -48,7 +48,7 @@ func parseMessageContent(raw string) (messageContent, error) {
 	out := messageContent{Attachments: parsed.files}
 	for _, text := range parsed.textParts {
 		if strings.TrimSpace(text) != "" {
-			out.Text = text
+			out.Text = normalizeText(text)
 			break
 		}
 	}
@@ -57,12 +57,25 @@ func parseMessageContent(raw string) (messageContent, error) {
 			continue
 		}
 		out.HTML = sanitizeHTML(htmlPart)
-		if out.Text == "" {
-			out.Text = htmlToText(htmlPart)
+		htmlText := htmlToText(htmlPart)
+		if shouldUseHTMLText(out.Text, htmlText) {
+			out.Text = htmlText
 		}
 		break
 	}
 	return out, nil
+}
+
+func shouldUseHTMLText(plainText string, htmlText string) bool {
+	if strings.TrimSpace(htmlText) == "" {
+		return false
+	}
+	if strings.TrimSpace(plainText) == "" {
+		return true
+	}
+	plainWords := len(strings.Fields(plainText))
+	htmlWords := len(strings.Fields(htmlText))
+	return (len(plainText) <= 40 || plainWords <= 5) && htmlWords >= 25 && len(htmlText) >= len(plainText)*4
 }
 
 func walkMIME(header textproto.MIMEHeader, body []byte, parsed *parsedMIME) {
@@ -228,6 +241,14 @@ func htmlToText(input string) string {
 	out = regexp.MustCompile(`(?is)<[^>]+>`).ReplaceAllString(out, " ")
 	out = html.UnescapeString(out)
 	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		lines[i] = normalizeText(line)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func normalizeText(text string) string {
+	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		lines[i] = strings.Join(strings.Fields(line), " ")
 	}

@@ -16,7 +16,7 @@ This CLI is designed for agentic and scripted iCloud automation, not as a genera
 - Use documented protocols only unless the user explicitly approves private iCloud API work.
 - Keep the supply-chain surface small. The current Go module has no third-party module dependencies; adding one should have a clear payoff and be called out in review.
 - Keep stdout reserved for command JSON. Diagnostics and logs must go to stderr or the configured log file.
-- Mail fetches are header-only unless content is requested with `--raw`, `--body text|html`, or `--attachments`; retrieve attachment bytes with `messages attachment get` and expect base64 JSON.
+- Mail fetches are header-only unless content is requested with `--raw`, `--body text|html`, or `--attachments`; `--body text` prefers useful plain text and falls back to HTML-derived text when the plain part is missing or only a tiny stub. Retrieve attachment bytes with `messages attachment get` and expect base64 JSON.
 
 ## Core Rules
 
@@ -126,7 +126,7 @@ Mail behavior notes:
 - Send uses SMTP and saves a copy to the detected Sent mailbox over IMAP.
 - Reply, reply-all, and forward are text-threading commands; replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, actual sends preserve Sent-copy behavior, `--dry-run` previews metadata without mutation, and `--draft` appends to Drafts without sending.
 - Reply, reply-all, and forward do not provide full MIME composition; do not imply HTML-aware quoting or attachment forwarding unless that feature is added later.
-- `messages get` is header-only unless `--raw`, `--body text|html`, or `--attachments` is passed; `messages attachment get --attachment <id>` returns one attachment as `content_base64`.
+- `messages get` is header-only unless `--raw`, `--body text|html`, or `--attachments` is passed; `--body text` may use HTML-derived text when the plain part is missing or only a tiny stub. `messages attachment get --attachment <id>` returns one attachment as `content_base64`.
 - Delete moves to the detected `\Trash` mailbox by default; permanent delete requires `--permanent`.
 - Message summary headers are decoded by default; `messages list --raw-headers` preserves raw subject/from/to/date fields.
 - `messages get` includes parsed IMAP flags when the server returns them.

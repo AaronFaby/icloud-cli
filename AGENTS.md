@@ -1,7 +1,7 @@
 <claude-mem-context>
 # Memory Context
 
-# [icloud-cli] recent context, 2026-06-23 8:01pm PDT
+# [icloud-cli] recent context, 2026-06-24 6:35am PDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
@@ -72,7 +72,7 @@ Use `icloud log status` to inspect the effective logging configuration. Logs sho
 
 CLI output is JSON by default, and `--json` is accepted on every command as a no-op for automation consistency. Nested `--help` should return a successful JSON help envelope and exit 0 without requiring credentials or network access.
 
-Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. `icloud mail messages get` is header-only by default; use `--body text`, `--body html`, `--attachments`, or `--raw` to fetch message content, and `icloud mail messages attachment get --attachment <id>` to retrieve one attachment as `content_base64`. Reply, reply-all, and forward preserve text-threading headers for replies, use `Fwd:` subject handling for forwards, support `--dry-run` metadata previews, and support `--draft` Drafts append. Actual reply/reply-all/forward sends must continue to append a Sent copy. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
+Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. `icloud mail messages get` is header-only by default; use `--body text`, `--body html`, `--attachments`, or `--raw` to fetch message content. `--body text` prefers useful plain text and falls back to HTML-derived text when the plain part is missing or only a tiny stub. Use `icloud mail messages attachment get --attachment <id>` to retrieve one attachment as `content_base64`. Reply, reply-all, and forward preserve text-threading headers for replies, use `Fwd:` subject handling for forwards, support `--dry-run` metadata previews, and support `--draft` Drafts append. Actual reply/reply-all/forward sends must continue to append a Sent copy. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
 
 When testing in this sandbox, keep Go's build cache inside the workspace:
 
