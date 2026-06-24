@@ -115,14 +115,70 @@ func TestNestedHelpExitsOKWithoutCredentials(t *testing.T) {
 	if !env.OK || env.Data.Usage != "icloud mail messages get [flags]" {
 		t.Fatalf("unexpected help envelope: %#v", env)
 	}
-	var sawID bool
+	var sawID, sawBody, sawAttachments bool
 	for _, flag := range env.Data.Flags {
-		if flag.Name == "id" {
+		switch flag.Name {
+		case "id":
 			sawID = true
+		case "body":
+			sawBody = true
+		case "attachments":
+			sawAttachments = true
 		}
 	}
-	if !sawID {
+	if !sawID || !sawBody || !sawAttachments {
 		t.Fatalf("help flags missing id: %#v", env.Data.Flags)
+	}
+}
+
+func TestAttachmentGetHelpExitsOKWithoutCredentials(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
+	t.Setenv("ICLOUD_APPLE_ID", "")
+	t.Setenv("ICLOUD_APP_PASSWORD", "")
+	var stdout bytes.Buffer
+	code := Run([]string{"mail", "messages", "attachment", "get", "--help"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
+	if code != output.ExitOK {
+		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+	var env struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Usage string `json:"usage"`
+			Flags []struct {
+				Name string `json:"name"`
+			} `json:"flags"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK || env.Data.Usage != "icloud mail messages attachment get [flags]" {
+		t.Fatalf("unexpected help envelope: %#v", env)
+	}
+	var sawAttachment bool
+	for _, flag := range env.Data.Flags {
+		if flag.Name == "attachment" {
+			sawAttachment = true
+		}
+	}
+	if !sawAttachment {
+		t.Fatalf("help flags missing attachment: %#v", env.Data.Flags)
+	}
+}
+
+func TestMessageGetRejectsInvalidBodyMode(t *testing.T) {
+	t.Setenv(logging.EnvLog, logging.DestinationOff)
+	var stdout bytes.Buffer
+	code := Run([]string{"mail", "messages", "get", "--id", "123", "--body", "xml"}, strings.NewReader(""), &stdout, &bytes.Buffer{})
+	if code != output.ExitValidation {
+		t.Fatalf("exit code = %d, output = %s", code, stdout.String())
+	}
+	var env output.Envelope
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.OK || env.Error == nil || env.Error.Code != "invalid_body_mode" {
+		t.Fatalf("unexpected envelope: %#v", env)
 	}
 }
 

@@ -1,13 +1,13 @@
 <claude-mem-context>
 # Memory Context
 
-# [icloud-cli] recent context, 2026-06-15 7:07am PDT
+# [icloud-cli] recent context, 2026-06-23 6:56pm PDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 5 obs (1,996t read) | 86,767t work | 98% savings
+Stats: 17 obs (5,687t read) | 1,913,935t work | 100% savings
 
 ### Jun 8, 2026
 548 4:05p ⚖️ iCloud Go CLI Tool: Project Concept Defined for Agentic AI Use
@@ -18,8 +18,22 @@ Stats: 5 obs (1,996t read) | 86,767t work | 98% savings
 557 8:24a ⚖️ iCloud CLI: Logging System Design — Environment-Variable-Driven with File Rotation
 ### Jun 14, 2026
 558 8:03a ⚖️ iCloud CLI: 5 Planned Improvements Scoped for Next Release
+### Jun 15, 2026
+559 7:08a ✅ iCloud CLI: MIT License Added to Project
+560 " ✅ iCloud CLI: MIT License Added and Pushed to GitHub
+561 " ⚖️ iCloud CLI Homebrew Distribution: Personal Tap + Source Formula
+562 " 🔵 iCloud CLI v1.0.3 Tarball: SHA256 and Root Directory Confirmed for Homebrew Formula
+### Jun 16, 2026
+566 1:11p ⚖️ iCloud CLI Homebrew Tap: Architecture Decisions Finalized
+567 " 🟣 iCloud CLI v1.0.4 Released: MIT License Included in Tagged Source
+568 " 🟣 AaronFaby/homebrew-tap Repository Created with icloud Formula and Automation
+569 " 🟣 bump-icloud.yml: Automated Formula Bump Workflow with PR Creation
+570 " 🟣 icloud-cli Release Workflow Now Dispatches Homebrew Tap Bump Automatically
+571 " ✅ README, SKILL.md, AGENTS.md Updated with Homebrew Install Instructions
+572 " 🔵 Homebrew brew audit Quirks and Node.js Warning in Tap CI
+573 " 🔵 Homebrew tap test-bot CI: brew test-bot --only-formulae Skipped on Push (PR-only)
 
-Access 87k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 1914k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
 
 # Agent Guidance
@@ -28,7 +42,7 @@ This repo contains a Go CLI named `icloud` for noninteractive, JSON-first iCloud
 
 The v1.0 surface covers:
 
-- Mail over IMAP/SMTP, including folder/message listing, search/get, send with Sent-copy append, text-threaded reply/reply-all/forward, Drafts append, move/copy/delete/archive, flags, read state, and batch mutations.
+- Mail over IMAP/SMTP, including folder/message listing, search/get, selective text/HTML body extraction, attachment metadata and base64 retrieval, send with Sent-copy append, text-threaded reply/reply-all/forward, Drafts append, move/copy/delete/archive, flags, read state, and batch mutations.
 - Calendar discovery and event CRUD over CalDAV.
 - Contacts address-book discovery and contact CRUD over CardDAV.
 - Capability reporting for unsupported services.
@@ -58,7 +72,7 @@ Use `icloud log status` to inspect the effective logging configuration. Logs sho
 
 CLI output is JSON by default, and `--json` is accepted on every command as a no-op for automation consistency. Nested `--help` should return a successful JSON help envelope and exit 0 without requiring credentials or network access.
 
-Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. Reply, reply-all, and forward preserve text-threading headers for replies, use `Fwd:` subject handling for forwards, support `--dry-run` metadata previews, and support `--draft` Drafts append. Actual reply/reply-all/forward sends must continue to append a Sent copy. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
+Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. `icloud mail messages get` is header-only by default; use `--body text`, `--body html`, `--attachments`, or `--raw` to fetch message content, and `icloud mail messages attachment get --attachment <id>` to retrieve one attachment as `content_base64`. Reply, reply-all, and forward preserve text-threading headers for replies, use `Fwd:` subject handling for forwards, support `--dry-run` metadata previews, and support `--draft` Drafts append. Actual reply/reply-all/forward sends must continue to append a Sent copy. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
 
 When testing in this sandbox, keep Go's build cache inside the workspace:
 

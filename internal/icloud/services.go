@@ -17,6 +17,7 @@ func Capabilities() []ServiceCapability {
 			Operations: []string{
 				"folders:list", "folders:create", "folders:rename", "folders:delete",
 				"messages:list", "messages:get", "messages:search", "messages:send",
+				"messages:attachment:get",
 				"messages:reply", "messages:reply-all", "messages:forward",
 				"messages:move", "messages:copy", "messages:delete", "messages:archive",
 				"messages:flag", "messages:unflag", "messages:mark-read", "messages:mark-unread",

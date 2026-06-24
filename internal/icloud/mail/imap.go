@@ -228,7 +228,7 @@ func (c *IMAPClient) FetchMessageWithOptions(folder, id string, opts FetchOption
 		return Message{}, err
 	}
 	item := "BODY.PEEK[HEADER]"
-	if opts.IncludeRaw {
+	if wantsFullMessage(opts) {
 		item = "BODY.PEEK[]"
 	}
 	resp, err := c.command("UID FETCH %s (UID FLAGS INTERNALDATE RFC822.SIZE %s)", id, item)
@@ -240,8 +240,13 @@ func (c *IMAPClient) FetchMessageWithOptions(folder, id string, opts FetchOption
 	if msg.ID == "" {
 		msg.ID = id
 	}
-	if opts.IncludeRaw && msg.Raw != "" {
-		parsed, err := netmail.ReadMessage(strings.NewReader(msg.Raw))
+	raw := ""
+	if wantsFullMessage(opts) && len(resp.Literals) > 0 {
+		raw = resp.Literals[len(resp.Literals)-1]
+	}
+	if opts.IncludeRaw && raw != "" {
+		msg.Raw = raw
+		parsed, err := netmail.ReadMessage(strings.NewReader(raw))
 		if err == nil {
 			body, _ := io.ReadAll(parsed.Body)
 			msg.Headers = map[string][]string(parsed.Header)
@@ -249,8 +254,43 @@ func (c *IMAPClient) FetchMessageWithOptions(folder, id string, opts FetchOption
 			applyHeaders(&msg.MessageSummary, parsed.Header, opts.RawHeaders)
 		}
 	}
-	logging.Info("imap_message_fetched", "folder", folder, "id", id, "include_raw", opts.IncludeRaw, "raw_bytes", len(msg.Raw), "body_bytes", len(msg.Body))
+	if raw != "" && (opts.BodyMode != "" || opts.IncludeAttachments) {
+		if content, err := parseMessageContent(raw); err == nil {
+			switch opts.BodyMode {
+			case "text":
+				msg.Body = content.Text
+			case "html":
+				msg.HTML = content.HTML
+			}
+			if opts.IncludeAttachments {
+				msg.Attachments = content.Attachments
+			}
+		}
+	}
+	logging.Info("imap_message_fetched", "folder", folder, "id", id, "include_raw", opts.IncludeRaw, "body_mode", opts.BodyMode, "include_attachments", opts.IncludeAttachments, "raw_bytes", len(msg.Raw), "body_bytes", len(msg.Body))
 	return msg, nil
+}
+
+func (c *IMAPClient) FetchAttachment(folder, id string, attachmentID string) (Attachment, error) {
+	if strings.TrimSpace(attachmentID) == "" {
+		return Attachment{}, output.Validation("missing_attachment_id", "attachment id is required", nil)
+	}
+	msg, err := c.FetchMessageWithOptions(folder, id, FetchOptions{IncludeRaw: true})
+	if err != nil {
+		return Attachment{}, err
+	}
+	attachment, ok, err := attachmentWithContent(msg.Raw, attachmentID)
+	if err != nil {
+		return Attachment{}, output.Remote("message_parse_failed", "failed to parse mail message", err.Error())
+	}
+	if !ok {
+		return Attachment{}, output.Validation("attachment_not_found", "attachment id was not found", map[string]string{"attachment": attachmentID})
+	}
+	return attachment, nil
+}
+
+func wantsFullMessage(opts FetchOptions) bool {
+	return opts.IncludeRaw || opts.BodyMode != "" || opts.IncludeAttachments
 }
 
 func (c *IMAPClient) Move(folder, id, toFolder string) error {

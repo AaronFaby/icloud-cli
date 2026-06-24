@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -345,6 +346,88 @@ func TestFetchMessageRawUsesBodyPeek(t *testing.T) {
 
 	if _, err := client.FetchMessage("INBOX", "123", true); err != nil {
 		t.Fatal(err)
+	}
+
+	want := []string{
+		`A0001 SELECT "INBOX"`,
+		`A0002 UID FETCH 123 (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[])`,
+	}
+	assertCommands(t, commands, want)
+}
+
+func TestFetchMessageHeaderOnlyUsesBodyPeekHeader(t *testing.T) {
+	client, commands := newScriptedIMAPClient(t, []string{
+		`* 1 EXISTS`,
+		`A0001 OK SELECT completed`,
+		`* 1 FETCH (UID 123 RFC822.SIZE 0 BODY[HEADER] NIL)`,
+		`A0002 OK FETCH completed`,
+	})
+	defer client.conn.Close()
+
+	if _, err := client.FetchMessage("INBOX", "123", false); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`A0001 SELECT "INBOX"`,
+		`A0002 UID FETCH 123 (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])`,
+	}
+	assertCommands(t, commands, want)
+}
+
+func TestFetchMessageBodyAndAttachmentsUseBodyPeek(t *testing.T) {
+	client, commands := newScriptedIMAPClient(t, []string{
+		`* 1 EXISTS`,
+		`A0001 OK SELECT completed`,
+		`* 1 FETCH (UID 123 RFC822.SIZE 0 BODY[] NIL)`,
+		`A0002 OK FETCH completed`,
+	})
+	defer client.conn.Close()
+
+	if _, err := client.FetchMessageWithOptions("INBOX", "123", FetchOptions{BodyMode: "text", IncludeAttachments: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`A0001 SELECT "INBOX"`,
+		`A0002 UID FETCH 123 (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[])`,
+	}
+	assertCommands(t, commands, want)
+}
+
+func TestFetchAttachmentReturnsContent(t *testing.T) {
+	raw := strings.Join([]string{
+		"Subject: x",
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: text/plain",
+		"",
+		"body",
+		"--mix",
+		"Content-Type: text/plain; name=\"note.txt\"",
+		"Content-Disposition: attachment; filename=\"note.txt\"",
+		"Content-Transfer-Encoding: base64",
+		"",
+		"aGVsbG8=",
+		"--mix--",
+		"",
+	}, "\r\n")
+	client, commands := newScriptedIMAPClient(t, []string{
+		`* 1 EXISTS`,
+		`A0001 OK SELECT completed`,
+		fmt.Sprintf(`* 1 FETCH (UID 123 RFC822.SIZE %d BODY[] {%d}`, len(raw), len(raw)),
+		raw,
+		`A0002 OK FETCH completed`,
+	})
+	defer client.conn.Close()
+
+	attachment, err := client.FetchAttachment("INBOX", "123", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment.Filename != "note.txt" || attachment.ContentBase64 != "aGVsbG8=" || attachment.Size != 5 {
+		t.Fatalf("attachment = %#v", attachment)
 	}
 
 	want := []string{

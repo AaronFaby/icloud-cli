@@ -15,7 +15,7 @@ This project exists to give agents, scripts, and containerized jobs a narrow, in
 
 V1 supports:
 
-- Mail over IMAP/SMTP, including message triage filters, decoded headers, send with Sent-copy append, reply/reply-all/forward, Drafts append, flags, read state, and move/copy/delete/archive mutations.
+- Mail over IMAP/SMTP, including message triage filters, decoded headers, selective text/HTML body extraction, attachment metadata and base64 retrieval, send with Sent-copy append, reply/reply-all/forward, Drafts append, flags, read state, and move/copy/delete/archive mutations.
 - Calendar discovery and event CRUD over CalDAV, including calendar lookup by display name.
 - Contacts address-book discovery and contact CRUD over CardDAV.
 - Capability reporting for unsupported iCloud services such as Drive, Notes, Reminders, and Photos.
@@ -24,7 +24,7 @@ Missing credentials, validation errors, unsupported services, and remote failure
 
 ## Status
 
-The current release is `v1.0.4`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
+The current release is `v1.0.5`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
 
 Release builds are produced for:
 
@@ -119,6 +119,8 @@ icloud mail messages list --folder INBOX --limit 10
 icloud mail messages list --folder INBOX --unread --since 24h --from domain.com --flagged --limit 10
 icloud mail messages search --folder INBOX --query 'FROM "alerts@example.com"'
 icloud mail messages get --folder INBOX --id 123 --raw
+icloud mail messages get --folder INBOX --id 123 --body text --attachments
+icloud mail messages attachment get --folder INBOX --id 123 --attachment 1
 icloud mail messages reply --folder INBOX --id 123 --input-json '{"text":"Thanks"}'
 icloud mail messages reply-all --folder INBOX --id 123 --input-json '{"text":"Thanks"}'
 icloud mail messages forward --folder INBOX --id 123 --input-json '{"to":["person@example.com"],"text":"FYI"}'
@@ -127,6 +129,8 @@ icloud mail messages forward --folder INBOX --id 123 --input-json '{"to":["perso
 All commands emit the JSON envelope by default. `--json` is accepted on every command as a no-op for automation that passes it consistently.
 
 Mail message summaries decode encoded headers such as RFC 2047 subjects by default. Use `--raw-headers` with `mail messages list` to include `raw_subject`, `raw_from`, `raw_to`, and `raw_date` alongside decoded fields.
+
+`mail messages get` is header-only by default. Use `--body text` for readable text, `--body html` for decoded sanitized HTML, `--attachments` for attachment metadata, and `--raw` for the full RFC822 message. Retrieve attachment bytes with `mail messages attachment get --attachment <id>`; the payload is returned as `content_base64` in the JSON envelope.
 
 Send mail:
 

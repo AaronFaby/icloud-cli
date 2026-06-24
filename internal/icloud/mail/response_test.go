@@ -127,3 +127,90 @@ func TestExtractReadableTextDecodesTransferEncodingsAndMultipart(t *testing.T) {
 		t.Fatalf("multipart text = %q", got)
 	}
 }
+
+func TestParseMessageContentExtractsTextHTMLAndAttachments(t *testing.T) {
+	raw := strings.Join([]string{
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: multipart/alternative; boundary=alt",
+		"",
+		"--alt",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		"<div onclick=\"bad()\">Hello&nbsp;<b>HTML</b><script>alert(1)</script><a href=\"javascript:bad()\">x</a></div>",
+		"--alt",
+		"Content-Type: text/plain; charset=utf-8",
+		"Content-Transfer-Encoding: quoted-printable",
+		"",
+		"plain=20body",
+		"--alt--",
+		"--mix",
+		"Content-Type: text/plain; name=\"note.txt\"",
+		"Content-Disposition: attachment; filename=\"note.txt\"",
+		"Content-Transfer-Encoding: base64",
+		"",
+		"aGVsbG8=",
+		"--mix--",
+		"",
+	}, "\r\n")
+
+	content, err := parseMessageContent(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Text != "plain body" {
+		t.Fatalf("text = %q", content.Text)
+	}
+	if strings.Contains(content.HTML, "script") || strings.Contains(content.HTML, "onclick") || strings.Contains(content.HTML, "javascript:") {
+		t.Fatalf("html was not sanitized: %q", content.HTML)
+	}
+	if len(content.Attachments) != 1 {
+		t.Fatalf("attachments = %#v", content.Attachments)
+	}
+	attachment := content.Attachments[0]
+	if attachment.ID != "1" || attachment.Filename != "note.txt" || attachment.ContentType != "text/plain" || attachment.Size != 5 || attachment.ContentBase64 != "" {
+		t.Fatalf("attachment = %#v", attachment)
+	}
+}
+
+func TestParseMessageContentFallsBackFromHTMLToText(t *testing.T) {
+	raw := "Content-Type: text/html; charset=utf-8\r\n\r\n<p>Hello<br>World &amp; friends</p>"
+	content, err := parseMessageContent(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Text != "Hello\nWorld & friends" {
+		t.Fatalf("text = %q", content.Text)
+	}
+}
+
+func TestAttachmentWithContentReturnsBase64(t *testing.T) {
+	raw := strings.Join([]string{
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: text/plain",
+		"",
+		"body",
+		"--mix",
+		"Content-Type: application/octet-stream",
+		"Content-Disposition: attachment; filename=\"file.bin\"",
+		"Content-Transfer-Encoding: base64",
+		"",
+		"aGVsbG8=",
+		"--mix--",
+		"",
+	}, "\r\n")
+
+	attachment, ok, err := attachmentWithContent(raw, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("attachment not found")
+	}
+	if attachment.ContentBase64 != "aGVsbG8=" || attachment.Size != 5 || attachment.Filename != "file.bin" {
+		t.Fatalf("attachment = %#v", attachment)
+	}
+}

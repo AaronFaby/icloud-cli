@@ -1,14 +1,7 @@
 package mail
 
 import (
-	"bytes"
-	"encoding/base64"
-	"io"
-	"mime"
-	"mime/multipart"
-	"mime/quotedprintable"
 	netmail "net/mail"
-	"net/textproto"
 	"regexp"
 	"strings"
 	"time"
@@ -213,66 +206,6 @@ func quoteOriginal(text string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
-}
-
-func extractReadableText(source Message) string {
-	if strings.TrimSpace(source.Raw) != "" {
-		if msg, err := netmail.ReadMessage(strings.NewReader(source.Raw)); err == nil {
-			body, _ := io.ReadAll(msg.Body)
-			if text := extractTextPart(textproto.MIMEHeader(msg.Header), body); strings.TrimSpace(text) != "" {
-				return text
-			}
-		}
-	}
-	return source.Body
-}
-
-func extractTextPart(header textproto.MIMEHeader, body []byte) string {
-	mediaType, params, _ := mime.ParseMediaType(header.Get("Content-Type"))
-	if mediaType == "" {
-		mediaType = "text/plain"
-	}
-	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
-		boundary := params["boundary"]
-		if boundary == "" {
-			return ""
-		}
-		reader := multipart.NewReader(bytes.NewReader(body), boundary)
-		for {
-			part, err := reader.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				break
-			}
-			partBody, _ := io.ReadAll(part)
-			if text := extractTextPart(part.Header, partBody); strings.TrimSpace(text) != "" {
-				return text
-			}
-		}
-		return ""
-	}
-	if strings.EqualFold(mediaType, "text/plain") {
-		return string(decodeTransfer(body, header.Get("Content-Transfer-Encoding")))
-	}
-	return ""
-}
-
-func decodeTransfer(body []byte, encoding string) []byte {
-	switch strings.ToLower(strings.TrimSpace(encoding)) {
-	case "quoted-printable":
-		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(body)))
-		if err == nil {
-			return decoded
-		}
-	case "base64":
-		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(bytes.TrimSpace(body))))
-		if err == nil {
-			return decoded
-		}
-	}
-	return body
 }
 
 func uniqueAddresses(values []string, exclude map[string]bool) []string {

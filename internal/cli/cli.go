@@ -294,15 +294,23 @@ func (a app) mailMessages(args []string) (any, error) {
 		folder := fs.String("folder", "INBOX", "folder")
 		id := fs.String("id", "", "message UID")
 		raw := fs.Bool("raw", false, "include raw RFC822 message")
+		body := fs.String("body", "", "extract body as text or html")
+		attachments := fs.Bool("attachments", false, "include attachment metadata")
 		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
 			return help, err
+		}
+		bodyMode, err := mailBodyMode(*body)
+		if err != nil {
+			return nil, err
 		}
 		client, err := a.imapClient(*configPath)
 		if err != nil {
 			return nil, err
 		}
 		defer client.Close()
-		return client.FetchMessage(*folder, *id, *raw)
+		return client.FetchMessageWithOptions(*folder, *id, mail.FetchOptions{IncludeRaw: *raw, BodyMode: bodyMode, IncludeAttachments: *attachments})
+	case "attachment":
+		return a.mailMessageAttachment(args[1:])
 	case "search":
 		fs := newFlagSet("mail messages search")
 		configPath := fs.String("config", "", "config path")
@@ -343,6 +351,41 @@ func (a app) mailMessages(args []string) (any, error) {
 		return a.singleMailMutation(args)
 	default:
 		return nil, output.Validation("unknown_mail_message_command", "unknown mail messages command", map[string]string{"command": args[0]})
+	}
+}
+
+func (a app) mailMessageAttachment(args []string) (any, error) {
+	if len(args) == 0 {
+		return nil, output.Validation("missing_attachment_command", "mail messages attachment command is required", nil)
+	}
+	switch args[0] {
+	case "get":
+		fs := newFlagSet("mail messages attachment get")
+		configPath := fs.String("config", "", "config path")
+		folder := fs.String("folder", "INBOX", "folder")
+		id := fs.String("id", "", "message UID")
+		attachmentID := fs.String("attachment", "", "attachment id from messages get --attachments")
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
+		}
+		client, err := a.imapClient(*configPath)
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		return client.FetchAttachment(*folder, *id, *attachmentID)
+	default:
+		return nil, output.Validation("unknown_attachment_command", "unknown mail messages attachment command", map[string]string{"command": args[0]})
+	}
+}
+
+func mailBodyMode(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	switch mode {
+	case "", "text", "html":
+		return mode, nil
+	default:
+		return "", output.Validation("invalid_body_mode", "body must be text or html", map[string]string{"body": value})
 	}
 }
 

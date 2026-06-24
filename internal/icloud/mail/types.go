@@ -37,15 +37,29 @@ type MessageListOptions struct {
 }
 
 type FetchOptions struct {
-	IncludeRaw bool
-	RawHeaders bool
+	IncludeRaw         bool
+	RawHeaders         bool
+	BodyMode           string
+	IncludeAttachments bool
 }
 
 type Message struct {
 	MessageSummary
-	Headers map[string][]string `json:"headers,omitempty"`
-	Body    string              `json:"body,omitempty"`
-	Raw     string              `json:"raw,omitempty"`
+	Headers     map[string][]string `json:"headers,omitempty"`
+	Body        string              `json:"body,omitempty"`
+	HTML        string              `json:"html,omitempty"`
+	Raw         string              `json:"raw,omitempty"`
+	Attachments []Attachment        `json:"attachments,omitempty"`
+}
+
+type Attachment struct {
+	ID            string `json:"id"`
+	Filename      string `json:"filename,omitempty"`
+	ContentType   string `json:"content_type,omitempty"`
+	Size          int    `json:"size"`
+	Inline        bool   `json:"inline,omitempty"`
+	ContentID     string `json:"content_id,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
 }
 
 type MutationResult struct {
