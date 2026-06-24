@@ -28,6 +28,7 @@ The current release is `v1.0.6`. The v1.0 series covers Mail, Calendar, and Cont
 
 Release builds are produced for:
 
+- Linux amd64
 - Linux arm64
 - macOS arm64
 

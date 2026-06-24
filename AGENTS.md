@@ -1,7 +1,7 @@
 <claude-mem-context>
 # Memory Context
 
-# [icloud-cli] recent context, 2026-06-24 6:44am PDT
+# [icloud-cli] recent context, 2026-06-24 7:12am PDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
@@ -88,7 +88,7 @@ GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aa
 
 When running live tests against iCloud, create disposable test records and clean them up in the same run. For Contacts, use the `contacts books list` entry whose `resource_types` includes `addressbook`; collection roots are not writable address books.
 
-Tags matching `v*` trigger GitHub Actions binary builds for Linux arm64 and macOS arm64, and publish release assets with sha256 files.
+Tags matching `v*` trigger GitHub Actions binary builds for Linux amd64, Linux arm64, and macOS arm64, and publish release assets with sha256 files.
 
 The Homebrew formula lives in the separate `AaronFaby/homebrew-tap` repository. Users install with `brew install AaronFaby/tap/icloud`; formula changes build from tagged source releases and should land through tap pull requests.
 
