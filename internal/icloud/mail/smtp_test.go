@@ -133,3 +133,62 @@ func TestSMTPCommandNameRedactsAddressCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvelopeAddressStripsDisplayName(t *testing.T) {
+	tests := map[string]string{
+		"sender@example.com":           "sender@example.com",
+		"Name <sender@example.com>":    "sender@example.com",
+		`"Quoted Name" <a@b.example>`:  "a@b.example",
+		"  Name <user@icloud.com>  ":   "user@icloud.com",
+	}
+	for raw, want := range tests {
+		got, err := envelopeAddress(raw)
+		if err != nil {
+			t.Fatalf("envelopeAddress(%q) error: %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("envelopeAddress(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestEnvelopeAddressRejectsInvalid(t *testing.T) {
+	for _, raw := range []string{"", "not-an-address", "Name <", "a b@c.com"} {
+		if _, err := envelopeAddress(raw); err == nil {
+			t.Fatalf("envelopeAddress(%q) expected error", raw)
+		}
+	}
+}
+
+func TestEncodeHeaderStripsCRLF(t *testing.T) {
+	got := encodeHeader("hello\r\nBcc: attacker@example.com")
+	if strings.Contains(got, "\r") || strings.Contains(got, "\n") {
+		t.Fatalf("encodeHeader leaked newline: %q", got)
+	}
+	if strings.Contains(got, "Bcc:") && strings.Contains(got, "\n") {
+		t.Fatalf("encodeHeader allowed header injection: %q", got)
+	}
+	// Sanitized to a single-line value (newline became space).
+	if !strings.Contains(got, "Bcc: attacker@example.com") {
+		// After sanitize, Bcc text remains as content of subject — that's fine;
+		// the important property is no CRLF to start a new header.
+		t.Fatalf("unexpected encodeHeader output: %q", got)
+	}
+
+	msg, err := buildMessage(SendRequest{
+		From:    "sender@example.com",
+		To:      []string{"one@example.com"},
+		Subject: "safe\r\nBcc: evil@example.com",
+		Text:    "body",
+		Headers: map[string]string{
+			"X-Agent-Test": "ok\r\nX-Injected: yes",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(msg)
+	if strings.Contains(raw, "\nBcc:") || strings.Contains(raw, "\nX-Injected:") {
+		t.Fatalf("message allowed header injection:\n%s", raw)
+	}
+}

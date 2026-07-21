@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -88,11 +89,19 @@ func (c *Client) PutEvent(ctx context.Context, calendarHref, id, calendarData st
 	if !strings.HasSuffix(id, ".ics") {
 		id += ".ics"
 	}
-	return c.put(ctx, c.eventURL(calendarHref, id), "text/calendar; charset=utf-8", calendarData)
+	requestURL := c.eventURL(calendarHref, id)
+	if requestURL == "" {
+		return Resource{}, output.Validation("invalid_event_id", "event id is invalid", map[string]string{"id": id})
+	}
+	return c.put(ctx, requestURL, "text/calendar; charset=utf-8", calendarData)
 }
 
 func (c *Client) DeleteEvent(ctx context.Context, calendarHref, id string) error {
-	return c.delete(ctx, c.eventURL(calendarHref, id))
+	requestURL := c.eventURL(calendarHref, id)
+	if requestURL == "" {
+		return output.Validation("invalid_event_id", "event id is invalid", map[string]string{"id": id})
+	}
+	return c.delete(ctx, requestURL)
 }
 
 func (c *Client) ListContacts(ctx context.Context, bookHref string) ([]Resource, error) {
@@ -105,7 +114,11 @@ func (c *Client) ListContacts(ctx context.Context, bookHref string) ([]Resource,
 }
 
 func (c *Client) GetContact(ctx context.Context, bookHref, id string) (Resource, error) {
-	return c.get(ctx, c.contactURL(bookHref, id))
+	requestURL := c.contactURL(bookHref, id)
+	if requestURL == "" {
+		return Resource{}, output.Validation("invalid_contact_id", "contact id is invalid", map[string]string{"id": id})
+	}
+	return c.get(ctx, requestURL)
 }
 
 func (c *Client) PutContact(ctx context.Context, bookHref, id, vcard string) (Resource, error) {
@@ -115,11 +128,19 @@ func (c *Client) PutContact(ctx context.Context, bookHref, id, vcard string) (Re
 	if !strings.HasSuffix(id, ".vcf") {
 		id += ".vcf"
 	}
-	return c.put(ctx, c.contactURL(bookHref, id), "text/vcard; charset=utf-8", vcard)
+	requestURL := c.contactURL(bookHref, id)
+	if requestURL == "" {
+		return Resource{}, output.Validation("invalid_contact_id", "contact id is invalid", map[string]string{"id": id})
+	}
+	return c.put(ctx, requestURL, "text/vcard; charset=utf-8", vcard)
 }
 
 func (c *Client) DeleteContact(ctx context.Context, bookHref, id string) error {
-	return c.delete(ctx, c.contactURL(bookHref, id))
+	requestURL := c.contactURL(bookHref, id)
+	if requestURL == "" {
+		return output.Validation("invalid_contact_id", "contact id is invalid", map[string]string{"id": id})
+	}
+	return c.delete(ctx, requestURL)
 }
 
 func (c *Client) propfind(ctx context.Context, url string, body string, depth string) ([]Resource, error) {
@@ -157,127 +178,147 @@ func (c *Client) discoverHomeSet(ctx context.Context, wellKnownPath, principalBo
 	return c.resourceURL(homeHref), nil
 }
 
-func (c *Client) xmlRequest(ctx context.Context, method string, url string, body string, depth string) ([]Resource, error) {
+func (c *Client) xmlRequest(ctx context.Context, method string, requestURL string, body string, depth string) ([]Resource, error) {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBufferString(body))
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewBufferString(body))
 	if err != nil {
 		return nil, err
 	}
-	req.SetBasicAuth(c.Config.AppleID, c.Config.AppPassword)
+	if err := c.authorize(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", `application/xml; charset="utf-8"`)
 	req.Header.Set("Depth", depth)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		logging.Error("webdav_request_transport_failed", "method", method, "url", logging.SanitizedURL(url), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
+		logging.Error("webdav_request_transport_failed", "method", method, "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
-	logging.Info("webdav_response", "method", method, "url", logging.SanitizedURL(url), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "request_bytes", len(body))
+	logging.Info("webdav_response", "method", method, "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "request_bytes", len(body))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		logging.Warn("webdav_auth_failed", "method", method, "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Warn("webdav_auth_failed", "method", method, "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return nil, output.Auth("webdav_auth_failed", "iCloud WebDAV authentication failed", map[string]any{"status": resp.StatusCode})
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		logging.Error("webdav_request_failed", "method", method, "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Error("webdav_request_failed", "method", method, "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return nil, output.Remote("webdav_request_failed", "iCloud WebDAV request failed", map[string]any{"status": resp.StatusCode, "body": string(b)})
 	}
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logging.Error("webdav_response_read_failed", "method", method, "url", logging.SanitizedURL(url), "error", err.Error())
+		logging.Error("webdav_response_read_failed", "method", method, "url", logging.SanitizedURL(requestURL), "error", err.Error())
 		return nil, err
 	}
 	resources, err := parseMultistatus(b)
 	if err != nil {
-		logging.Error("webdav_parse_failed", "method", method, "url", logging.SanitizedURL(url), "response_bytes", len(b), "error", err.Error())
+		logging.Error("webdav_parse_failed", "method", method, "url", logging.SanitizedURL(requestURL), "response_bytes", len(b), "error", err.Error())
 		return nil, err
 	}
-	logging.Info("webdav_multistatus_parsed", "method", method, "url", logging.SanitizedURL(url), "response_bytes", len(b), "resource_count", len(resources))
+	logging.Info("webdav_multistatus_parsed", "method", method, "url", logging.SanitizedURL(requestURL), "response_bytes", len(b), "resource_count", len(resources))
 	return resources, nil
 }
 
-func (c *Client) get(ctx context.Context, url string) (Resource, error) {
+func (c *Client) get(ctx context.Context, requestURL string) (Resource, error) {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
 	if err != nil {
 		return Resource{}, err
 	}
-	req.SetBasicAuth(c.Config.AppleID, c.Config.AppPassword)
+	if err := c.authorize(req); err != nil {
+		return Resource{}, err
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		logging.Error("webdav_get_transport_failed", "url", logging.SanitizedURL(url), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
+		logging.Error("webdav_get_transport_failed", "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return Resource{}, err
 	}
 	defer resp.Body.Close()
-	logging.Info("webdav_response", "method", "GET", "url", logging.SanitizedURL(url), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
+	logging.Info("webdav_response", "method", "GET", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		logging.Warn("webdav_auth_failed", "method", "GET", "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Warn("webdav_auth_failed", "method", "GET", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return Resource{}, output.Auth("webdav_auth_failed", "iCloud WebDAV authentication failed", map[string]any{"status": resp.StatusCode})
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		logging.Error("webdav_get_failed", "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Error("webdav_get_failed", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return Resource{}, output.Remote("webdav_get_failed", "iCloud WebDAV GET failed", map[string]any{"status": resp.StatusCode})
 	}
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logging.Error("webdav_get_read_failed", "url", logging.SanitizedURL(url), "error", err.Error())
+		logging.Error("webdav_get_read_failed", "url", logging.SanitizedURL(requestURL), "error", err.Error())
 		return Resource{}, err
 	}
-	logging.Info("webdav_get_success", "url", logging.SanitizedURL(url), "response_bytes", len(b))
-	return Resource{Href: url, ETag: resp.Header.Get("ETag"), Data: string(b)}, nil
+	logging.Info("webdav_get_success", "url", logging.SanitizedURL(requestURL), "response_bytes", len(b))
+	return Resource{Href: requestURL, ETag: resp.Header.Get("ETag"), Data: string(b)}, nil
 }
 
-func (c *Client) put(ctx context.Context, url string, contentType string, data string) (Resource, error) {
+func (c *Client) put(ctx context.Context, requestURL string, contentType string, data string) (Resource, error) {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, strings.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "PUT", requestURL, strings.NewReader(data))
 	if err != nil {
 		return Resource{}, err
 	}
-	req.SetBasicAuth(c.Config.AppleID, c.Config.AppPassword)
+	if err := c.authorize(req); err != nil {
+		return Resource{}, err
+	}
 	req.Header.Set("Content-Type", contentType)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		logging.Error("webdav_put_transport_failed", "url", logging.SanitizedURL(url), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
+		logging.Error("webdav_put_transport_failed", "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return Resource{}, err
 	}
 	defer resp.Body.Close()
-	logging.Info("webdav_response", "method", "PUT", "url", logging.SanitizedURL(url), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "request_bytes", len(data))
+	logging.Info("webdav_response", "method", "PUT", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "request_bytes", len(data))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		logging.Warn("webdav_auth_failed", "method", "PUT", "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Warn("webdav_auth_failed", "method", "PUT", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return Resource{}, output.Auth("webdav_auth_failed", "iCloud WebDAV authentication failed", map[string]any{"status": resp.StatusCode})
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		logging.Error("webdav_put_failed", "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Error("webdav_put_failed", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return Resource{}, output.Remote("webdav_put_failed", "iCloud WebDAV PUT failed", map[string]any{"status": resp.StatusCode, "body": string(b)})
 	}
-	logging.Info("webdav_put_success", "url", logging.SanitizedURL(url), "request_bytes", len(data))
-	return Resource{Href: url, ETag: resp.Header.Get("ETag"), Data: data}, nil
+	logging.Info("webdav_put_success", "url", logging.SanitizedURL(requestURL), "request_bytes", len(data))
+	return Resource{Href: requestURL, ETag: resp.Header.Get("ETag"), Data: data}, nil
 }
 
-func (c *Client) delete(ctx context.Context, url string) error {
+func (c *Client) delete(ctx context.Context, requestURL string) error {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", requestURL, nil)
 	if err != nil {
 		return err
 	}
-	req.SetBasicAuth(c.Config.AppleID, c.Config.AppPassword)
+	if err := c.authorize(req); err != nil {
+		return err
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		logging.Error("webdav_delete_transport_failed", "url", logging.SanitizedURL(url), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
+		logging.Error("webdav_delete_transport_failed", "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return err
 	}
 	defer resp.Body.Close()
-	logging.Info("webdav_response", "method", "DELETE", "url", logging.SanitizedURL(url), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
+	logging.Info("webdav_response", "method", "DELETE", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		logging.Warn("webdav_auth_failed", "method", "DELETE", "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Warn("webdav_auth_failed", "method", "DELETE", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return output.Auth("webdav_auth_failed", "iCloud WebDAV authentication failed", map[string]any{"status": resp.StatusCode})
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		logging.Error("webdav_delete_failed", "url", logging.SanitizedURL(url), "status", resp.StatusCode)
+		logging.Error("webdav_delete_failed", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return output.Remote("webdav_delete_failed", "iCloud WebDAV DELETE failed", map[string]any{"status": resp.StatusCode})
 	}
-	logging.Info("webdav_delete_success", "url", logging.SanitizedURL(url))
+	logging.Info("webdav_delete_success", "url", logging.SanitizedURL(requestURL))
+	return nil
+}
+
+// authorize attaches Basic Auth only after the request host is allowlisted.
+func (c *Client) authorize(req *http.Request) error {
+	if req == nil || req.URL == nil {
+		return output.Validation("invalid_webdav_url", "WebDAV request URL is required", nil)
+	}
+	if err := c.ensureAllowedHost(req.URL); err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.Config.AppleID, c.Config.AppPassword)
 	return nil
 }
 
@@ -351,6 +392,10 @@ func parseMultistatus(b []byte) ([]Resource, error) {
 }
 
 func (c *Client) resourceURL(href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return c.BaseURL
+	}
 	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
 		return href
 	}
@@ -365,13 +410,69 @@ func (c *Client) resourceURL(href string) string {
 	return base.ResolveReference(ref).String()
 }
 
+// ensureAllowedHost rejects URLs that would send Basic Auth credentials to a
+// non-allowlisted host (SSRF / credential exfiltration protection).
+func (c *Client) ensureAllowedHost(u *url.URL) error {
+	if u == nil {
+		return output.Validation("invalid_webdav_url", "WebDAV URL is missing a host", nil)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return output.Validation("invalid_webdav_url", "WebDAV URL is missing a host", nil)
+	}
+	baseHost := ""
+	if base, err := url.Parse(c.BaseURL); err == nil {
+		baseHost = strings.ToLower(base.Hostname())
+	}
+	// Always allow the configured base host (production iCloud base or httptest in tests).
+	if baseHost != "" && host == baseHost {
+		return nil
+	}
+	if isAllowedICloudHost(host) {
+		if !strings.EqualFold(u.Scheme, "https") {
+			return output.Validation("insecure_webdav_url", "iCloud WebDAV URLs must use https", map[string]string{"host": host})
+		}
+		return nil
+	}
+	return output.Validation("webdav_host_not_allowed", "WebDAV URL host is not allowlisted for credentialed requests", map[string]string{"host": host})
+}
+
+func isAllowedICloudHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	switch host {
+	case "caldav.icloud.com", "contacts.icloud.com", "icloud.com":
+		return true
+	}
+	return strings.HasSuffix(host, ".icloud.com")
+}
+
 func (c *Client) childURL(parentHref, id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return c.resourceURL(parentHref)
+	}
+	// Disallow path traversal. Multi-segment relative paths (e.g. .well-known/caldav) are OK.
+	if containsPathTraversal(id) {
+		return ""
+	}
 	u, err := url.Parse(c.resourceURL(parentHref))
 	if err != nil {
 		return c.resourceURL(parentHref)
 	}
 	u.Path = path.Join(u.Path, id)
 	return u.String()
+}
+
+func containsPathTraversal(id string) bool {
+	if strings.Contains(id, `\`) {
+		return true
+	}
+	for _, part := range strings.Split(id, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func addPropHref(res *Resource, name, href string) {
@@ -394,7 +495,8 @@ func firstPropHref(resources []Resource, name string) string {
 }
 
 func wrapRemote(code, message string, err error) error {
-	if _, ok := err.(*output.ExitError); ok {
+	var exitErr *output.ExitError
+	if errors.As(err, &exitErr) {
 		return err
 	}
 	return output.Remote(code, message, err.Error())
@@ -404,13 +506,18 @@ func isExitCode(err error, code string) bool {
 	if err == nil {
 		return false
 	}
-	exitErr, ok := err.(*output.ExitError)
-	return ok && exitErr.Err.Code == code
+	var exitErr *output.ExitError
+	return errors.As(err, &exitErr) && exitErr.Err.Code == code
 }
 
 func (c *Client) eventURL(calendarHref, id string) string {
+	id = strings.TrimSpace(id)
 	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") || strings.HasPrefix(id, "/") {
 		return c.resourceURL(id)
+	}
+	// Bare resource names must not contain path separators or traversal.
+	if containsPathTraversal(id) || strings.ContainsAny(id, `/\`) {
+		return ""
 	}
 	if !strings.HasSuffix(id, ".ics") {
 		id += ".ics"
@@ -419,8 +526,12 @@ func (c *Client) eventURL(calendarHref, id string) string {
 }
 
 func (c *Client) contactURL(bookHref, id string) string {
+	id = strings.TrimSpace(id)
 	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") || strings.HasPrefix(id, "/") {
 		return c.resourceURL(id)
+	}
+	if containsPathTraversal(id) || strings.ContainsAny(id, `/\`) {
+		return ""
 	}
 	if !strings.HasSuffix(id, ".vcf") {
 		id += ".vcf"

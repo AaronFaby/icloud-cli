@@ -218,8 +218,9 @@ func (c *IMAPClient) FetchMessage(folder, id string, includeRaw bool) (Message, 
 }
 
 func (c *IMAPClient) FetchMessageWithOptions(folder, id string, opts FetchOptions) (Message, error) {
-	if strings.TrimSpace(id) == "" {
-		return Message{}, output.Validation("missing_message_id", "message id is required", nil)
+	id, err := validateUID(id)
+	if err != nil {
+		return Message{}, err
 	}
 	if strings.TrimSpace(folder) == "" {
 		folder = "INBOX"
@@ -294,13 +295,17 @@ func wantsFullMessage(opts FetchOptions) bool {
 }
 
 func (c *IMAPClient) Move(folder, id, toFolder string) error {
+	id, err := validateUID(id)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(toFolder) == "" {
 		return output.Validation("missing_destination_folder", "destination folder is required", nil)
 	}
 	if err := c.selectFolder(defaultFolder(folder)); err != nil {
 		return err
 	}
-	_, err := c.command("UID MOVE %s %s", id, quote(toFolder))
+	_, err = c.command("UID MOVE %s %s", id, quote(toFolder))
 	if err == nil {
 		logging.Info("imap_message_moved", "folder", folder, "id", id)
 		return nil
@@ -313,12 +318,21 @@ func (c *IMAPClient) Move(folder, id, toFolder string) error {
 		logging.Error("imap_move_cleanup_failed", "folder", folder, "id", id, "error", storeErr.Error())
 		return output.Remote("imap_move_cleanup_failed", "message copied but source could not be marked deleted", storeErr.Error())
 	}
-	_, _ = c.command("EXPUNGE")
+	// Prefer UID EXPUNGE so only the target message is removed. Never fall back to
+	// mailbox-wide EXPUNGE, which would permanently delete unrelated \Deleted mail.
+	if _, expungeErr := c.command("UID EXPUNGE %s", id); expungeErr != nil {
+		logging.Error("imap_move_expunge_failed", "folder", folder, "id", id, "error", expungeErr.Error())
+		return output.Remote("imap_move_cleanup_failed", "message copied and marked deleted, but source could not be expunged (UIDPLUS required)", expungeErr.Error())
+	}
 	logging.Warn("imap_message_moved_with_copy_delete_fallback", "folder", folder, "id", id)
 	return nil
 }
 
 func (c *IMAPClient) Copy(folder, id, toFolder string) error {
+	id, err := validateUID(id)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(toFolder) == "" {
 		return output.Validation("missing_destination_folder", "destination folder is required", nil)
 	}
@@ -334,6 +348,11 @@ func (c *IMAPClient) Copy(folder, id, toFolder string) error {
 }
 
 func (c *IMAPClient) Delete(folder, id, trashFolder string, permanent bool, dryRun bool) (MutationResult, error) {
+	rawID := strings.TrimSpace(id)
+	id, err := validateUID(id)
+	if err != nil {
+		return MutationResult{ID: rawID, OK: false, Error: err.Error()}, err
+	}
 	if dryRun {
 		mode := "move_to_trash"
 		if permanent {
@@ -365,12 +384,11 @@ func (c *IMAPClient) Delete(folder, id, trashFolder string, permanent bool, dryR
 		logging.Info("imap_message_permanently_deleted", "folder", folder, "id", id)
 		return MutationResult{ID: id, OK: true}, nil
 	}
-	if _, err := c.command("EXPUNGE"); err != nil {
-		logging.Error("imap_expunge_failed", "folder", folder, "id", id, "error", err.Error())
-		return MutationResult{ID: id, OK: false, Error: err.Error()}, output.Remote("imap_expunge_failed", "failed to permanently delete mail message", err.Error())
-	}
-	logging.Warn("imap_expunge_fallback_used", "folder", folder, "id", id)
-	return MutationResult{ID: id, OK: true, Warning: "server did not accept UID EXPUNGE; mailbox EXPUNGE fallback was used"}, nil
+	// Do not fall back to mailbox-wide EXPUNGE: that permanently removes every
+	// message already marked \Deleted in the selected folder.
+	logging.Error("imap_uid_expunge_unsupported", "folder", folder, "id", id)
+	err = output.Remote("imap_expunge_failed", "permanent delete requires UID EXPUNGE (UIDPLUS); message was marked deleted but not expunged to avoid removing unrelated mail", map[string]string{"id": id, "folder": folder})
+	return MutationResult{ID: id, OK: false, Error: err.Error(), Warning: "message marked \\Deleted; mailbox-wide EXPUNGE was not used"}, err
 }
 
 func (c *IMAPClient) Archive(folder, id, archiveFolder string) error {
@@ -381,6 +399,10 @@ func (c *IMAPClient) Archive(folder, id, archiveFolder string) error {
 }
 
 func (c *IMAPClient) SetFlag(folder, id, flag string, enable bool) error {
+	id, err := validateUID(id)
+	if err != nil {
+		return err
+	}
 	if err := c.selectFolder(defaultFolder(folder)); err != nil {
 		return err
 	}
@@ -506,9 +528,9 @@ func (c *IMAPClient) readUntilTag(tag string) (imapResponse, error) {
 			if _, err := io.ReadFull(c.r, data); err != nil {
 				return resp, err
 			}
-			literal := string(data)
-			resp.Literals = append(resp.Literals, literal)
-			resp.Lines = append(resp.Lines, literal)
+			// Keep literals only in Literals — never in Lines. Message bodies can
+			// contain substrings like "FLAGS (" that would confuse protocol parsers.
+			resp.Literals = append(resp.Literals, string(data))
 		}
 		if strings.HasPrefix(line, tag+" ") {
 			return resp, nil
@@ -557,8 +579,9 @@ func parseSearch(line string) []string {
 
 func parseFetch(folder, fallbackID string, resp imapResponse, opts FetchOptions) Message {
 	msg := Message{MessageSummary: MessageSummary{ID: fallbackID, Folder: folder}}
+	// resp.Lines contains protocol lines only (literals live in resp.Literals).
 	for _, line := range resp.Lines {
-		if strings.Contains(line, "FETCH") {
+		if strings.Contains(line, "FETCH") || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
 			msg.ID = firstSubmatch(`UID ([0-9]+)`, line, msg.ID)
 			msg.InternalDate = firstSubmatch(`INTERNALDATE "([^"]+)"`, line, msg.InternalDate)
 			if size := firstSubmatch(`RFC822\.SIZE ([0-9]+)`, line, ""); size != "" {
@@ -782,6 +805,21 @@ func defaultFolder(folder string) string {
 		return "INBOX"
 	}
 	return folder
+}
+
+// validateUID accepts a single decimal IMAP UID. Multi-token or non-numeric
+// values must be rejected before they are interpolated into IMAP commands.
+func validateUID(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", output.Validation("missing_message_id", "message id is required", nil)
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return "", output.Validation("invalid_message_id", "message id must be a decimal IMAP UID", map[string]string{"id": id})
+		}
+	}
+	return id, nil
 }
 
 func ensureCRLF(msg []byte) []byte {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -112,10 +113,10 @@ func TestEnsureCRLF(t *testing.T) {
 }
 
 func TestParseFetchReadsFlagsFromContinuationLine(t *testing.T) {
+	// Protocol lines only: body literals are stored separately and must not appear in Lines.
 	msg := parseFetch("INBOX", "183860", imapResponse{
 		Lines: []string{
 			`* 1 FETCH (UID 183860 RFC822.SIZE 42 BODY[HEADER] {10}`,
-			"Subject: x",
 			` FLAGS (\Seen \Flagged) INTERNALDATE "09-Jun-2026 06:00:00 -0700")`,
 			`A0001 OK Fetch completed`,
 		},
@@ -437,14 +438,14 @@ func TestFetchAttachmentReturnsContent(t *testing.T) {
 	assertCommands(t, commands, want)
 }
 
-func TestMoveFallsBackToCopyStoreExpunge(t *testing.T) {
+func TestMoveFallsBackToCopyStoreUIDExpunge(t *testing.T) {
 	client, commands := newScriptedIMAPClient(t, []string{
 		`* 1 EXISTS`,
 		`A0001 OK SELECT completed`,
 		`A0002 BAD MOVE unsupported`,
 		`A0003 OK COPY completed`,
 		`A0004 OK STORE completed`,
-		`A0005 OK EXPUNGE completed`,
+		`A0005 OK UID EXPUNGE completed`,
 	})
 	defer client.conn.Close()
 
@@ -457,26 +458,53 @@ func TestMoveFallsBackToCopyStoreExpunge(t *testing.T) {
 		`A0002 UID MOVE 123 "Archive/2026"`,
 		`A0003 UID COPY 123 "Archive/2026"`,
 		`A0004 UID STORE 123 +FLAGS.SILENT (\Deleted)`,
-		`A0005 EXPUNGE`,
+		`A0005 UID EXPUNGE 123`,
 	}
 	assertCommands(t, commands, want)
 }
 
-func TestPermanentDeleteFallsBackToExpunge(t *testing.T) {
+func TestMoveFallbackFailsWithoutUIDExpunge(t *testing.T) {
+	client, commands := newScriptedIMAPClient(t, []string{
+		`* 1 EXISTS`,
+		`A0001 OK SELECT completed`,
+		`A0002 BAD MOVE unsupported`,
+		`A0003 OK COPY completed`,
+		`A0004 OK STORE completed`,
+		`A0005 BAD UID EXPUNGE unsupported`,
+	})
+	defer client.conn.Close()
+
+	if err := client.Move("INBOX", "123", "Archive/2026"); err == nil {
+		t.Fatal("expected move cleanup error when UID EXPUNGE is unsupported")
+	}
+
+	want := []string{
+		`A0001 SELECT "INBOX"`,
+		`A0002 UID MOVE 123 "Archive/2026"`,
+		`A0003 UID COPY 123 "Archive/2026"`,
+		`A0004 UID STORE 123 +FLAGS.SILENT (\Deleted)`,
+		`A0005 UID EXPUNGE 123`,
+	}
+	assertCommands(t, commands, want)
+}
+
+func TestPermanentDeleteRejectsMailboxExpungeFallback(t *testing.T) {
 	client, commands := newScriptedIMAPClient(t, []string{
 		`* 1 EXISTS`,
 		`A0001 OK SELECT completed`,
 		`A0002 OK STORE completed`,
 		`A0003 BAD UID EXPUNGE unsupported`,
-		`A0004 OK EXPUNGE completed`,
 	})
 	defer client.conn.Close()
 
 	result, err := client.Delete("INBOX", "123", "Trash", true, false)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("expected permanent delete to fail without UID EXPUNGE")
 	}
-	if !result.OK || !strings.Contains(result.Warning, "EXPUNGE fallback") {
+	if result.OK {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(result.Warning, "mailbox-wide EXPUNGE was not used") {
 		t.Fatalf("result = %#v", result)
 	}
 
@@ -484,9 +512,33 @@ func TestPermanentDeleteFallsBackToExpunge(t *testing.T) {
 		`A0001 SELECT "INBOX"`,
 		`A0002 UID STORE 123 +FLAGS.SILENT (\Deleted)`,
 		`A0003 UID EXPUNGE 123`,
-		`A0004 EXPUNGE`,
 	}
 	assertCommands(t, commands, want)
+}
+
+func TestValidateUIDRejectsInjection(t *testing.T) {
+	for _, id := range []string{"", "123 456", "123\r\nSTORE", "1;2", "abc", "1,2"} {
+		if _, err := validateUID(id); err == nil {
+			t.Fatalf("validateUID(%q) expected error", id)
+		}
+	}
+	if got, err := validateUID(" 42 "); err != nil || got != "42" {
+		t.Fatalf("validateUID(42) = %q, %v", got, err)
+	}
+}
+
+func TestParseFetchIgnoresFLAGSInBodyLiteral(t *testing.T) {
+	body := "Subject: test\r\n\r\nbody mentions FLAGS (\\Seen) here\r\n"
+	msg := parseFetch("INBOX", "55", imapResponse{
+		Lines: []string{
+			`* 1 FETCH (UID 55 FLAGS (\Flagged) RFC822.SIZE 10 BODY[] {` + strconv.Itoa(len(body)) + `}`,
+			`A0001 OK Fetch completed`,
+		},
+		Literals: []string{body},
+	}, FetchOptions{IncludeRaw: true})
+	if len(msg.Flags) != 1 || msg.Flags[0] != `\Flagged` {
+		t.Fatalf("flags = %#v, want [\\Flagged] from protocol only", msg.Flags)
+	}
 }
 
 func TestCopyRequiresDestination(t *testing.T) {

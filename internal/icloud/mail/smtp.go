@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
+	netmail "net/mail"
 	"net/textproto"
 	"sort"
 	"strings"
@@ -135,11 +136,19 @@ func sendMailTLS(addr string, username string, password string, from string, to 
 		return err
 	}
 	logging.Info("smtp_auth_success", "host", addr)
-	if err := smtpCommand(tc, 250, "MAIL FROM:<"+from+">"); err != nil {
+	fromAddr, err := envelopeAddress(from)
+	if err != nil {
 		return err
 	}
-	for _, addr := range to {
-		if err := smtpCommand(tc, 250, "RCPT TO:<"+addr+">"); err != nil {
+	if err := smtpCommand(tc, 250, "MAIL FROM:<"+fromAddr+">"); err != nil {
+		return err
+	}
+	for _, recipient := range to {
+		rcpt, err := envelopeAddress(recipient)
+		if err != nil {
+			return err
+		}
+		if err := smtpCommand(tc, 250, "RCPT TO:<"+rcpt+">"); err != nil {
 			return err
 		}
 	}
@@ -261,10 +270,47 @@ func writePart(writer *multipart.Writer, contentType string, body string) {
 }
 
 func encodeHeader(value string) string {
+	value = sanitizeHeaderValue(value)
 	if value == "" || isASCII(value) {
 		return value
 	}
 	return "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(value)) + "?="
+}
+
+// sanitizeHeaderValue strips CR/LF so agent- or user-supplied header values
+// cannot inject additional SMTP/MIME headers.
+func sanitizeHeaderValue(value string) string {
+	if value == "" {
+		return value
+	}
+	value = strings.ReplaceAll(value, "\r", "")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.TrimSpace(value)
+}
+
+// envelopeAddress extracts a bare email address for SMTP MAIL FROM / RCPT TO.
+// Display-name forms such as `Name <user@example.com>` are accepted for headers
+// but must not be placed inside angle brackets in the SMTP envelope.
+func envelopeAddress(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty email address")
+	}
+	// Bare address without display name.
+	if !strings.ContainsAny(raw, "<>,\"") && strings.Count(raw, "@") == 1 {
+		if strings.ContainsAny(raw, " \t\r\n") {
+			return "", fmt.Errorf("invalid email address")
+		}
+		return raw, nil
+	}
+	addr, err := netmail.ParseAddress(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid email address %q: %w", raw, err)
+	}
+	if strings.TrimSpace(addr.Address) == "" {
+		return "", fmt.Errorf("empty email address")
+	}
+	return addr.Address, nil
 }
 
 func isASCII(s string) bool {

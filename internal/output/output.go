@@ -2,6 +2,7 @@ package output
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -73,7 +74,8 @@ func Success(w io.Writer, service, operation string, data any, warnings ...strin
 func Failure(w io.Writer, service, operation string, err error) int {
 	exitCode := ExitUnexpected
 	outErr := Error{Code: "unexpected_error", Message: err.Error()}
-	if e, ok := err.(*ExitError); ok {
+	var e *ExitError
+	if errors.As(err, &e) {
 		exitCode = e.ExitCode
 		outErr = e.Err
 	}

@@ -486,6 +486,9 @@ func (a app) singleMailMutation(args []string) (any, error) {
 	if strings.TrimSpace(*id) == "" {
 		return nil, output.Validation("missing_message_id", "message id is required", nil)
 	}
+	if *dryRun && op != "delete" {
+		return mail.MutationResult{ID: *id, OK: true, Warning: "dry_run:" + op}, nil
+	}
 	client, err := a.imapClient(*configPath)
 	if err != nil {
 		return nil, err
@@ -533,6 +536,13 @@ func (a app) mailBatch(args []string) (any, error) {
 	}
 	if len(req.IDs) == 0 {
 		return nil, output.Validation("missing_message_ids", "batch request must include ids", nil)
+	}
+	if req.DryRun && op != "delete" {
+		results := make([]mail.MutationResult, 0, len(req.IDs))
+		for _, id := range req.IDs {
+			results = append(results, mail.MutationResult{ID: id, OK: true, Warning: "dry_run:" + op})
+		}
+		return map[string]any{"folder": req.Folder, "operation": op, "results": results}, nil
 	}
 	client, err := a.imapClient(*configPath)
 	if err != nil {

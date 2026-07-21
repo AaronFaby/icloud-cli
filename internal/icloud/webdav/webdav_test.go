@@ -327,6 +327,56 @@ func TestCalendarQueryBodyEscapesFallbackTimeRange(t *testing.T) {
 	}
 }
 
+func TestAuthorizeRejectsForeignAbsoluteURLs(t *testing.T) {
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "secret-pass"})
+	// Absolute URL to a non-allowlisted host must not receive Basic Auth or be fetched.
+	err := client.DeleteEvent(context.Background(), "/calendars/work/", "https://evil.example/steal.ics")
+	if err == nil {
+		t.Fatal("expected foreign host rejection")
+	}
+	if sawRequest {
+		t.Fatal("request was sent to local server for foreign absolute URL")
+	}
+	if !strings.Contains(err.Error(), "not allowlisted") && !strings.Contains(err.Error(), "allowlisted") {
+		// Error message comes from Validation message field.
+		if exitMsg := err.Error(); !strings.Contains(exitMsg, "allowlist") && !strings.Contains(strings.ToLower(exitMsg), "host") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+}
+
+func TestAuthorizeAllowsICloudHosts(t *testing.T) {
+	client := New(CalendarBase, config.Config{AppleID: "user", AppPassword: "pass"})
+	req, err := http.NewRequest(http.MethodGet, "https://p48-caldav.icloud.com/123/calendars/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.authorize(req); err != nil {
+		t.Fatalf("expected iCloud host allow: %v", err)
+	}
+	user, pass, ok := req.BasicAuth()
+	if !ok || user != "user" || pass != "pass" {
+		t.Fatalf("basic auth = %q %q ok=%v", user, pass, ok)
+	}
+}
+
+func TestChildURLRejectsPathTraversal(t *testing.T) {
+	client := New(CalendarBase, config.Config{})
+	if got := client.childURL("/calendars/work/", "../other/evil.ics"); got != "" {
+		t.Fatalf("childURL traversal = %q, want empty", got)
+	}
+	if got := client.eventURL("/calendars/work/", "../other/evil"); got != "" {
+		t.Fatalf("eventURL traversal = %q, want empty", got)
+	}
+}
+
 func TestParseMultistatusReadsResourceTypesAndHomeSets(t *testing.T) {
 	resources, err := parseMultistatus([]byte(`<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
