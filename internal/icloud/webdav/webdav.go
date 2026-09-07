@@ -3,12 +3,14 @@ package webdav
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,6 +76,10 @@ func (c *Client) ListAddressBooks(ctx context.Context) ([]Resource, error) {
 }
 
 func (c *Client) ListEvents(ctx context.Context, calendarHref, from, to string) ([]Resource, error) {
+	from, to, err := CalendarRange(from, to)
+	if err != nil {
+		return nil, err
+	}
 	resources, err := c.report(ctx, c.resourceURL(calendarHref), calendarQueryBody(from, to), "1")
 	if err != nil {
 		return nil, wrapRemote("caldav_events_list_failed", "failed to list iCloud calendar events", err)
@@ -82,18 +88,31 @@ func (c *Client) ListEvents(ctx context.Context, calendarHref, from, to string) 
 	return resources, nil
 }
 
-func (c *Client) PutEvent(ctx context.Context, calendarHref, id, calendarData string) (Resource, error) {
+func (c *Client) CreateEvent(ctx context.Context, calendarHref, id, calendarData string) (Resource, error) {
+	return c.putEvent(ctx, calendarHref, id, calendarData, true, "")
+}
+
+func (c *Client) PutEvent(ctx context.Context, calendarHref, id, calendarData, etag string) (Resource, error) {
+	return c.putEvent(ctx, calendarHref, id, calendarData, false, etag)
+}
+
+func (c *Client) putEvent(ctx context.Context, calendarHref, id, calendarData string, create bool, etag string) (Resource, error) {
 	if strings.TrimSpace(id) == "" {
 		id = eventUID(calendarData)
-	}
-	if !strings.HasSuffix(id, ".ics") {
-		id += ".ics"
 	}
 	requestURL := c.eventURL(calendarHref, id)
 	if requestURL == "" {
 		return Resource{}, output.Validation("invalid_event_id", "event id is invalid", map[string]string{"id": id})
 	}
-	return c.put(ctx, requestURL, "text/calendar; charset=utf-8", calendarData)
+	return c.put(ctx, requestURL, "text/calendar; charset=utf-8", calendarData, create, etag)
+}
+
+func (c *Client) GetEvent(ctx context.Context, calendarHref, id string) (Resource, error) {
+	requestURL := c.eventURL(calendarHref, id)
+	if requestURL == "" {
+		return Resource{}, output.Validation("invalid_event_id", "event id is invalid", nil)
+	}
+	return c.get(ctx, requestURL)
 }
 
 func (c *Client) DeleteEvent(ctx context.Context, calendarHref, id string) error {
@@ -101,7 +120,7 @@ func (c *Client) DeleteEvent(ctx context.Context, calendarHref, id string) error
 	if requestURL == "" {
 		return output.Validation("invalid_event_id", "event id is invalid", map[string]string{"id": id})
 	}
-	return c.delete(ctx, requestURL)
+	return c.delete(ctx, requestURL, "text/calendar")
 }
 
 func (c *Client) ListContacts(ctx context.Context, bookHref string) ([]Resource, error) {
@@ -121,18 +140,23 @@ func (c *Client) GetContact(ctx context.Context, bookHref, id string) (Resource,
 	return c.get(ctx, requestURL)
 }
 
-func (c *Client) PutContact(ctx context.Context, bookHref, id, vcard string) (Resource, error) {
+func (c *Client) CreateContact(ctx context.Context, bookHref, id, vcard string) (Resource, error) {
+	return c.putContact(ctx, bookHref, id, vcard, true, "")
+}
+
+func (c *Client) PutContact(ctx context.Context, bookHref, id, vcard, etag string) (Resource, error) {
+	return c.putContact(ctx, bookHref, id, vcard, false, etag)
+}
+
+func (c *Client) putContact(ctx context.Context, bookHref, id, vcard string, create bool, etag string) (Resource, error) {
 	if strings.TrimSpace(id) == "" {
 		id = vcardUID(vcard)
-	}
-	if !strings.HasSuffix(id, ".vcf") {
-		id += ".vcf"
 	}
 	requestURL := c.contactURL(bookHref, id)
 	if requestURL == "" {
 		return Resource{}, output.Validation("invalid_contact_id", "contact id is invalid", map[string]string{"id": id})
 	}
-	return c.put(ctx, requestURL, "text/vcard; charset=utf-8", vcard)
+	return c.put(ctx, requestURL, "text/vcard; charset=utf-8", vcard, create, etag)
 }
 
 func (c *Client) DeleteContact(ctx context.Context, bookHref, id string) error {
@@ -140,7 +164,7 @@ func (c *Client) DeleteContact(ctx context.Context, bookHref, id string) error {
 	if requestURL == "" {
 		return output.Validation("invalid_contact_id", "contact id is invalid", map[string]string{"id": id})
 	}
-	return c.delete(ctx, requestURL)
+	return c.delete(ctx, requestURL, "text/vcard")
 }
 
 func (c *Client) propfind(ctx context.Context, url string, body string, depth string) ([]Resource, error) {
@@ -189,7 +213,7 @@ func (c *Client) xmlRequest(ctx context.Context, method string, requestURL strin
 	}
 	req.Header.Set("Content-Type", `application/xml; charset="utf-8"`)
 	req.Header.Set("Depth", depth)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		logging.Error("webdav_request_transport_failed", "method", method, "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return nil, err
@@ -215,6 +239,20 @@ func (c *Client) xmlRequest(ctx context.Context, method string, requestURL strin
 		logging.Error("webdav_parse_failed", "method", method, "url", logging.SanitizedURL(requestURL), "response_bytes", len(b), "error", err.Error())
 		return nil, err
 	}
+	for i := range resources {
+		ref, err := url.Parse(resources[i].Href)
+		if err != nil {
+			return nil, output.Remote("invalid_webdav_href", "WebDAV response contains an invalid href", nil)
+		}
+		resources[i].Href = resp.Request.URL.ResolveReference(ref).String()
+		for name, href := range resources[i].propHrefs {
+			ref, err := url.Parse(href)
+			if err != nil {
+				return nil, output.Remote("invalid_webdav_href", "WebDAV response contains an invalid href", nil)
+			}
+			resources[i].propHrefs[name] = resp.Request.URL.ResolveReference(ref).String()
+		}
+	}
 	logging.Info("webdav_multistatus_parsed", "method", method, "url", logging.SanitizedURL(requestURL), "response_bytes", len(b), "resource_count", len(resources))
 	return resources, nil
 }
@@ -228,7 +266,7 @@ func (c *Client) get(ctx context.Context, requestURL string) (Resource, error) {
 	if err := c.authorize(req); err != nil {
 		return Resource{}, err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		logging.Error("webdav_get_transport_failed", "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return Resource{}, err
@@ -252,7 +290,7 @@ func (c *Client) get(ctx context.Context, requestURL string) (Resource, error) {
 	return Resource{Href: requestURL, ETag: resp.Header.Get("ETag"), Data: string(b)}, nil
 }
 
-func (c *Client) put(ctx context.Context, requestURL string, contentType string, data string) (Resource, error) {
+func (c *Client) put(ctx context.Context, requestURL string, contentType string, data string, create bool, etag string) (Resource, error) {
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, "PUT", requestURL, strings.NewReader(data))
 	if err != nil {
@@ -262,7 +300,15 @@ func (c *Client) put(ctx context.Context, requestURL string, contentType string,
 		return Resource{}, err
 	}
 	req.Header.Set("Content-Type", contentType)
-	resp, err := c.HTTP.Do(req)
+	if create {
+		req.Header.Set("If-None-Match", "*")
+	} else {
+		if etag == "" {
+			etag = "*"
+		}
+		req.Header.Set("If-Match", etag)
+	}
+	resp, err := c.do(req)
 	if err != nil {
 		logging.Error("webdav_put_transport_failed", "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return Resource{}, err
@@ -282,16 +328,21 @@ func (c *Client) put(ctx context.Context, requestURL string, contentType string,
 	return Resource{Href: requestURL, ETag: resp.Header.Get("ETag"), Data: data}, nil
 }
 
-func (c *Client) delete(ctx context.Context, requestURL string) error {
+func (c *Client) delete(ctx context.Context, requestURL, contentType string) error {
+	requestURL, etag, err := c.verifiedDeleteTarget(ctx, requestURL, contentType)
+	if err != nil {
+		return err
+	}
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, "DELETE", requestURL, nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("If-Match", etag)
 	if err := c.authorize(req); err != nil {
 		return err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		logging.Error("webdav_delete_transport_failed", "url", logging.SanitizedURL(requestURL), "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return err
@@ -302,12 +353,54 @@ func (c *Client) delete(ctx context.Context, requestURL string) error {
 		logging.Warn("webdav_auth_failed", "method", "DELETE", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return output.Auth("webdav_auth_failed", "iCloud WebDAV authentication failed", map[string]any{"status": resp.StatusCode})
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		logging.Error("webdav_delete_failed", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return output.Remote("webdav_delete_failed", "iCloud WebDAV DELETE failed", map[string]any{"status": resp.StatusCode})
 	}
 	logging.Info("webdav_delete_success", "url", logging.SanitizedURL(requestURL))
 	return nil
+}
+
+// do applies the same authorization boundary to every redirect, including when
+// callers supply a custom HTTP transport.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	client := *c.HTTP
+	previousCheck := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if via[0].Method == "DELETE" {
+			return output.Validation("unsafe_delete_redirect", "refusing to redirect a verified DELETE", nil)
+		}
+		if len(via) >= 10 {
+			return errors.New("too many WebDAV redirects")
+		}
+		if err := c.ensureAllowedHost(next.URL); err != nil {
+			return err
+		}
+		if previousCheck != nil {
+			if err := previousCheck(next, via); err != nil {
+				return err
+			}
+		}
+		// net/http changes PROPFIND/REPORT into GET on 301/302/303. Discovery
+		// must retain its method and body; mutations must never become GETs.
+		original := via[0]
+		if next.Method != original.Method {
+			if original.Method != "PROPFIND" && original.Method != "REPORT" {
+				return errors.New("WebDAV redirect changed the request method")
+			}
+			next.Method = original.Method
+			if original.GetBody != nil {
+				var err error
+				next.Body, err = original.GetBody()
+				if err != nil {
+					return err
+				}
+				next.ContentLength = original.ContentLength
+			}
+		}
+		return c.authorize(next)
+	}
+	return client.Do(req)
 }
 
 // authorize attaches Basic Auth only after the request host is allowlisted.
@@ -323,16 +416,19 @@ func (c *Client) authorize(req *http.Request) error {
 }
 
 type multistatus struct {
+	XMLName   xml.Name   `xml:"DAV: multistatus"`
 	Responses []response `xml:"response"`
 }
 
 type response struct {
 	Href     string     `xml:"href"`
+	Status   string     `xml:"status"`
 	Propstat []propstat `xml:"propstat"`
 }
 
 type propstat struct {
-	Prop prop `xml:"prop"`
+	Prop   prop   `xml:"prop"`
+	Status string `xml:"status"`
 }
 
 type prop struct {
@@ -362,8 +458,14 @@ func parseMultistatus(b []byte) ([]Resource, error) {
 	}
 	out := make([]Resource, 0, len(ms.Responses))
 	for _, r := range ms.Responses {
+		if !successfulDAVStatus(r.Status) {
+			continue
+		}
 		res := Resource{Href: r.Href}
 		for _, ps := range r.Propstat {
+			if !successfulDAVStatus(ps.Status) {
+				continue
+			}
 			if ps.Prop.DisplayName != "" {
 				res.DisplayName = ps.Prop.DisplayName
 			}
@@ -391,6 +493,18 @@ func parseMultistatus(b []byte) ([]Resource, error) {
 	return out, nil
 }
 
+func successfulDAVStatus(status string) bool {
+	if strings.TrimSpace(status) == "" {
+		return true
+	}
+	fields := strings.Fields(status)
+	if len(fields) < 2 {
+		return false
+	}
+	code, err := strconv.Atoi(fields[1])
+	return err == nil && code >= 200 && code < 300
+}
+
 func (c *Client) resourceURL(href string) string {
 	href = strings.TrimSpace(href)
 	if href == "" {
@@ -401,11 +515,11 @@ func (c *Client) resourceURL(href string) string {
 	}
 	base, err := url.Parse(c.BaseURL)
 	if err != nil {
-		return c.BaseURL
+		return ""
 	}
 	ref, err := url.Parse(href)
 	if err != nil {
-		return c.BaseURL
+		return ""
 	}
 	return base.ResolveReference(ref).String()
 }
@@ -420,18 +534,21 @@ func (c *Client) ensureAllowedHost(u *url.URL) error {
 	if host == "" {
 		return output.Validation("invalid_webdav_url", "WebDAV URL is missing a host", nil)
 	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return output.Validation("insecure_webdav_url", "WebDAV URLs must use https", map[string]string{"host": host})
+	}
+	if u.User != nil {
+		return output.Validation("invalid_webdav_url", "WebDAV URLs must not include credentials", nil)
+	}
 	baseHost := ""
 	if base, err := url.Parse(c.BaseURL); err == nil {
 		baseHost = strings.ToLower(base.Hostname())
 	}
-	// Always allow the configured base host (production iCloud base or httptest in tests).
+	// Allow the configured HTTPS base host and iCloud discovery hosts.
 	if baseHost != "" && host == baseHost {
 		return nil
 	}
 	if isAllowedICloudHost(host) {
-		if !strings.EqualFold(u.Scheme, "https") {
-			return output.Validation("insecure_webdav_url", "iCloud WebDAV URLs must use https", map[string]string{"host": host})
-		}
 		return nil
 	}
 	return output.Validation("webdav_host_not_allowed", "WebDAV URL host is not allowlisted for credentialed requests", map[string]string{"host": host})
@@ -457,7 +574,7 @@ func (c *Client) childURL(parentHref, id string) string {
 	}
 	u, err := url.Parse(c.resourceURL(parentHref))
 	if err != nil {
-		return c.resourceURL(parentHref)
+		return ""
 	}
 	u.Path = path.Join(u.Path, id)
 	return u.String()
@@ -512,6 +629,9 @@ func isExitCode(err error, code string) bool {
 
 func (c *Client) eventURL(calendarHref, id string) string {
 	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
 	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") || strings.HasPrefix(id, "/") {
 		return c.resourceURL(id)
 	}
@@ -527,6 +647,9 @@ func (c *Client) eventURL(calendarHref, id string) string {
 
 func (c *Client) contactURL(bookHref, id string) string {
 	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
 	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") || strings.HasPrefix(id, "/") {
 		return c.resourceURL(id)
 	}
@@ -592,7 +715,14 @@ func addressBookBody() string {
 func calendarQueryBody(from, to string) string {
 	timeRange := ""
 	if from != "" || to != "" {
-		timeRange = `<C:time-range start="` + escapeXMLAttr(compactCalTime(from)) + `" end="` + escapeXMLAttr(compactCalTime(to)) + `"/>`
+		timeRange = `<C:time-range`
+		if from != "" {
+			timeRange += ` start="` + escapeXMLAttr(from) + `"`
+		}
+		if to != "" {
+			timeRange += ` end="` + escapeXMLAttr(to) + `"`
+		}
+		timeRange += `/>`
 	}
 	return `<?xml version="1.0" encoding="utf-8"?>
 <C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
@@ -618,15 +748,27 @@ func addressBookQueryBody() string {
 </C:addressbook-query>`
 }
 
-func compactCalTime(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
+// CalendarRange validates supplied bounds and formats them as CalDAV UTC times.
+func CalendarRange(from, to string) (string, string, error) {
+	bounds := []*string{&from, &to}
+	for _, bound := range bounds {
+		*bound = strings.TrimSpace(*bound)
+		if *bound == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, *bound)
+		if err != nil {
+			t, err = time.Parse("20060102T150405Z", *bound)
+		}
+		if err != nil {
+			return "", "", output.Validation("invalid_calendar_time", "calendar times must be RFC3339 or CalDAV UTC timestamps", nil)
+		}
+		*bound = t.UTC().Format("20060102T150405Z")
 	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UTC().Format("20060102T150405Z")
+	if from != "" && to != "" && from >= to {
+		return "", "", output.Validation("invalid_calendar_range", "calendar end must be after start", nil)
 	}
-	return strings.NewReplacer("-", "", ":", "", ".", "").Replace(s)
+	return from, to, nil
 }
 
 func escapeXMLAttr(s string) string {
@@ -636,11 +778,11 @@ func escapeXMLAttr(s string) string {
 }
 
 func eventUID(calendarData string) string {
-	return firstLineValue(calendarData, "UID:", "event-"+time.Now().UTC().Format("20060102T150405Z"))
+	return firstLineValue(calendarData, "UID:", "event-"+rand.Text())
 }
 
 func vcardUID(vcard string) string {
-	return firstLineValue(vcard, "UID:", "contact-"+time.Now().UTC().Format("20060102T150405Z"))
+	return firstLineValue(vcard, "UID:", "contact-"+rand.Text())
 }
 
 func firstLineValue(data, prefix, fallback string) string {

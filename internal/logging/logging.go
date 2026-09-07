@@ -1,15 +1,16 @@
 package logging
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 const (
@@ -55,9 +56,10 @@ type Status struct {
 }
 
 var (
-	mu     sync.RWMutex
-	active = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	cfg    = Config{Destination: DestinationOff, Level: defaultLevel, SizeMB: defaultSizeMB, History: defaultHistory}
+	mu          sync.RWMutex
+	active      = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	ownedWriter io.Closer
+	cfg         = Config{Destination: DestinationOff, Level: defaultLevel, SizeMB: defaultSizeMB, History: defaultHistory}
 )
 
 func LoadConfig() Config {
@@ -114,7 +116,14 @@ func LoadConfig() Config {
 
 func Configure(config Config, stderr io.Writer) Config {
 	level := slogLevel(config.Level)
-	handlerOpts := &slog.HandlerOptions{Level: level}
+	handlerOpts := &slog.HandlerOptions{Level: level, ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+		// Remote and parser error strings can echo credentials or user content.
+		// Keep the event, error code, status, and timing, never the echoed text.
+		if attr.Key == "error" || attr.Key == "error_message" {
+			return slog.String(attr.Key, "[redacted]")
+		}
+		return attr
+	}}
 
 	for _, warning := range config.Warnings {
 		fmt.Fprintf(fallbackWriter(stderr), "icloud logging warning: %s\n", warning)
@@ -122,7 +131,7 @@ func Configure(config Config, stderr io.Writer) Config {
 	printedWarnings := len(config.Warnings)
 
 	if config.Destination == DestinationOff {
-		setLogger(slog.New(slog.NewJSONHandler(io.Discard, handlerOpts)), config)
+		setLogger(slog.New(slog.NewJSONHandler(io.Discard, handlerOpts)), config, nil)
 		return config
 	}
 
@@ -155,7 +164,11 @@ func Configure(config Config, stderr io.Writer) Config {
 		fmt.Fprintf(fallbackWriter(stderr), "icloud logging warning: %s\n", warning)
 	}
 
-	setLogger(slog.New(slog.NewJSONHandler(writer, handlerOpts)), config)
+	var owned io.Closer
+	if fileWriter, ok := writer.(*rotatingWriter); ok {
+		owned = fileWriter
+	}
+	setLogger(slog.New(slog.NewJSONHandler(writer, handlerOpts)), config, owned)
 	return config
 }
 
@@ -203,6 +216,7 @@ func Error(msg string, args ...any) {
 func SanitizedArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	redactNext := false
+	flagsStarted := false
 	for _, arg := range args {
 		if redactNext {
 			out = append(out, "[redacted]")
@@ -210,23 +224,38 @@ func SanitizedArgs(args []string) []string {
 			continue
 		}
 		name, hasValue := splitFlag(arg)
-		switch name {
-		case "--app-password", "-app-password", "--apple-id", "-apple-id":
+		if !strings.HasPrefix(name, "-") {
+			if !flagsStarted && strings.Contains(" auth check save doctor services list capabilities log status mail folders messages batch create rename delete get search send attachment reply reply-all forward move copy archive flag unflag mark-read mark-unread calendar calendars events contacts books help drive icloud-drive icloud_drive notes reminders photos ", " "+arg+" ") && !strings.ContainsAny(arg, " \t\r\n") {
+				out = append(out, arg)
+			} else {
+				out = append(out, "[redacted]")
+			}
+			continue
+		}
+		flagsStarted = true
+		switch strings.TrimLeft(name, "-") {
+		case "help", "h", "json", "unread", "flagged", "raw-headers", "raw", "attachments", "permanent", "dry-run", "draft":
 			if hasValue {
 				out = append(out, name+"=[redacted]")
 			} else {
-				out = append(out, arg)
-				redactNext = true
+				out = append(out, name)
 			}
-		case "--input-json", "-input-json":
+		case "input-json":
 			if hasValue {
 				out = append(out, name+"=[json]")
 			} else {
-				out = append(out, arg)
+				out = append(out, name)
+				redactNext = true
+			}
+		case "config", "apple-id", "app-password", "folder", "name", "limit", "since", "from", "id", "body", "attachment", "query", "to-folder", "trash-folder", "archive-folder", "calendar", "calendar-name", "to", "book":
+			if hasValue {
+				out = append(out, name+"=[redacted]")
+			} else {
+				out = append(out, name)
 				redactNext = true
 			}
 		default:
-			out = append(out, redactInlineSecrets(arg))
+			out = append(out, "[redacted]")
 		}
 	}
 	return out
@@ -251,26 +280,30 @@ func SanitizedSMTPCommand(line string) string {
 }
 
 func SanitizedURL(raw string) string {
-	replacer := strings.NewReplacer("\n", "", "\r", "")
-	raw = replacer.Replace(raw)
-	if i := strings.Index(raw, "?"); i >= 0 {
-		raw = raw[:i]
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "[redacted]"
 	}
-	return raw
+	// DAV resource paths can contain account identifiers or user-chosen names.
+	return u.Scheme + "://" + u.Host
 }
 
-func setLogger(logger *slog.Logger, config Config) {
+func setLogger(logger *slog.Logger, config Config, owned io.Closer) {
 	mu.Lock()
 	defer mu.Unlock()
+	if ownedWriter != nil {
+		_ = ownedWriter.Close()
+	}
+	ownedWriter = owned
 	active = logger
 	cfg = config
 }
 
 func logWithLevel(level slog.Level, msg string, args ...any) {
 	mu.RLock()
+	defer mu.RUnlock()
 	logger := active
-	mu.RUnlock()
-	logger.Log(contextWithoutCancel{}, level, msg, args...)
+	logger.Log(context.Background(), level, msg, args...)
 }
 
 func fallbackWriter(stderr io.Writer) io.Writer {
@@ -326,10 +359,3 @@ func countRotated(path string, history int) int {
 	}
 	return count
 }
-
-type contextWithoutCancel struct{}
-
-func (contextWithoutCancel) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (contextWithoutCancel) Done() <-chan struct{}       { return nil }
-func (contextWithoutCancel) Err() error                  { return nil }
-func (contextWithoutCancel) Value(any) any               { return nil }

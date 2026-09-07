@@ -9,7 +9,7 @@ This project exists to give agents, scripts, and containerized jobs a narrow, in
 - Agentic use: every command is noninteractive, JSON-first, and suitable for tool-calling loops that need stable output envelopes and exit codes.
 - Documented protocols: Mail uses IMAP/SMTP, Calendar uses CalDAV, and Contacts uses CardDAV. Unsupported services return structured explanations instead of silently reaching for private APIs.
 - Standard interfaces only: the project only supports iCloud features exposed through standard protocols. It will not add scraping, browser-session reuse, private endpoint reverse engineering, or other hacks to reach iCloud Drive, Photos, Notes, Reminders, or any other iCloud area without a standardized interface.
-- Reduced supply-chain surface: the CLI is written in Go with no third-party Go module dependencies, which keeps builds easier to audit and limits dependency-driven supply-chain risk.
+- Small dependency surface: beyond the Go standard library, the CLI uses Go's `golang.org/x/net` HTML parser and charset reader, with `golang.org/x/text` for character decoding. Versions are pinned in `go.mod` and verified through `go.sum`.
 - Container portability: credentials can be supplied entirely through environment variables, logs stay outside stdout, and release binaries are published for Linux and macOS targets.
 - Automation safety: destructive operations require explicit flags where appropriate, live workflows can use dry-runs and drafts, and logs intentionally avoid user content and secrets.
 
@@ -24,7 +24,9 @@ Missing credentials, validation errors, unsupported services, and remote failure
 
 ## Status
 
-The current release is `v1.0.7`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. The supported surface has been validated with deterministic tests and live smoke tests against iCloud using disposable mail/calendar/contact records.
+The current release is `v1.0.7`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. Earlier functionality has been smoke-tested against iCloud using disposable records.
+
+This README describes the working tree, including unreleased security changes: environment-based `auth save`, guarded DAV deletion, bounded MIME/HTML parsing, and the Go 1.25 minimum. These changes have passed local tests and security review; they have not yet had live iCloud validation or been included in a published release. Installations from the release page or Homebrew do not yet include them.
 
 Release builds are produced for:
 
@@ -59,13 +61,13 @@ Create the app-specific password from your Apple Account. Apple documents the fl
 
 Use the generated app-specific password as `ICLOUD_APP_PASSWORD`, not your primary Apple Account password. If you reset your primary Apple Account password or revoke the app-specific password, generate a new app-specific password and update the environment variable or saved config.
 
-Optional plaintext config file storage:
+Optional plaintext config file storage, using credentials already supplied through the environment:
 
 ```sh
-icloud auth save --apple-id name@example.com --app-password app-specific-password
+icloud auth save
 ```
 
-Prefer environment variables for automation. `auth save` writes plaintext JSON and should only be used on machines where that tradeoff is acceptable.
+Prefer environment variables injected by your secret manager or CI for automation. Avoid typing literal secrets into shell commands that may be saved in history. `auth save` reads `ICLOUD_APPLE_ID` and `ICLOUD_APP_PASSWORD` when the corresponding flags are omitted; explicit flags remain supported but may expose values through process arguments. It writes plaintext JSON and should only be used on machines where that tradeoff is acceptable.
 
 Default config path:
 
@@ -100,7 +102,7 @@ Logs include operational metadata such as command lifecycle, timings, remote sta
 ## Exit Codes
 
 - `0`: success
-- `1`: unexpected error
+- `1`: unexpected error or failure writing the JSON output
 - `2`: validation error
 - `3`: authentication or missing credentials
 - `4`: remote service or protocol error
@@ -128,9 +130,17 @@ icloud mail messages forward --folder INBOX --id 123 --input-json '{"to":["perso
 
 All commands emit the JSON envelope by default. `--json` is accepted on every command as a no-op for automation that passes it consistently.
 
+Nested command and group `--help` returns JSON and exits successfully without credentials or network access. Command arguments must use named flags; unexpected positional arguments are rejected so trailing safety flags cannot be silently ignored.
+
 Mail message summaries decode encoded headers such as RFC 2047 subjects by default. Use `--raw-headers` with `mail messages list` to include `raw_subject`, `raw_from`, `raw_to`, and `raw_date` alongside decoded fields.
 
+`--since` uses IMAP's calendar-day precision: `--since 24h` includes messages from the resulting date, rather than enforcing an exact rolling 24-hour cutoff. Plain-text searches and the list command's `--from` filter support Unicode; raw IMAP search criteria must be ASCII.
+
 `mail messages get` is header-only by default. Use `--body text` for readable text, `--body html` for decoded sanitized HTML, `--attachments` for attachment metadata, and `--raw` for the full RFC822 message. Text extraction prefers useful `text/plain` parts and falls back to HTML-derived text when the plain part is missing or only a tiny stub. Retrieve attachment bytes with `mail messages attachment get --attachment <id>`; the payload is returned as `content_base64` in the JSON envelope.
+
+Mail parsing is bounded: messages and IMAP literals are limited to 32 MiB, MIME nesting to 16 levels, MIME entities to 1,000, and cumulative decoded reads to 128 MiB. Multipart content is streamed; metadata-only attachment reads discard file bytes. IMAP responses are limited to 64 MiB, 100,000 lines, and 1 MiB per line. Exceeding a limit returns an error.
+
+Decoded and sanitized HTML are limited to 4 MiB, 50,000 tokens and attributes combined, and 1 MiB per token. Input is checked before tree construction; text extraction reuses the sanitized tree. Overly large or complex HTML returns an explicit error.
 
 Send mail:
 
@@ -143,6 +153,10 @@ icloud mail messages send --input-json '{
 ```
 
 Successful sends are accepted by SMTP and then copied to the detected Sent mailbox over IMAP. If SMTP succeeds but saving the sent copy fails, the command reports `sent_copy.ok=false` instead of retrying the send.
+
+Outgoing headers exceeding the 998-byte encoded line limit return a validation error before sending or saving a draft. Shorten the field or recipient list when this occurs.
+
+IMAP sessions have a 30-second deadline; SMTP sends and DAV operations have 45-second deadlines. Saving a Sent copy uses a separate IMAP session. Once SMTP accepts the message, a cleanup failure does not turn the send into a failure that could trigger a duplicate retry.
 
 Reply, reply-all, and forward compose text-threaded messages from a source message. Replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, and actual sends use the same Sent-copy behavior as `messages send`. Pass `--dry-run` to preview recipients, subject, headers, and intended flags without sending or saving; pass `--draft` to append the composed message to Drafts instead of sending. This surface does not preserve attachments or render HTML quotes.
 
@@ -199,38 +213,51 @@ Calendar event CRUD:
 icloud calendar events list --calendar /123/calendars/work/ --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
 icloud calendar events list --calendar-name Aristotle --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
 icloud calendar events create --calendar /123/calendars/work/ --input-json '{
+  "id": "planning-example",
   "summary": "Planning",
   "start": "2026-06-10T17:00:00Z",
   "end": "2026-06-10T17:30:00Z"
 }'
-icloud calendar events update --calendar /123/calendars/work/ --id event-20260610T170000Z --input-json '{"calendar_data":"BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:event-20260610T170000Z\nDTSTART:20260610T170000Z\nDTEND:20260610T173000Z\nSUMMARY:Planning\nEND:VEVENT\nEND:VCALENDAR"}'
-icloud calendar events delete --calendar /123/calendars/work/ --id event-20260610T170000Z
+icloud calendar events update --calendar /123/calendars/work/ --id planning-example --input-json '{"summary":"Planning updated","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
+icloud calendar events delete --calendar /123/calendars/work/ --id planning-example
 ```
 
-Event IDs may be bare resource IDs such as `event-20260610T170000Z`, full `.ics` names, absolute hrefs returned by `events list`, or full resource URLs.
+Event IDs may be bare resource IDs such as `planning-example`, full `.ics` names, absolute hrefs returned by `events list`, or full resource URLs. The example supplies an ID to make the sequence reproducible; when omitting it, use the returned resource href for subsequent operations.
+
+Creates generate random IDs when omitted and reject an existing resource instead of overwriting it. Updates require a target ID and an existing resource. Structured updates preserve the stored UID and use its ETag to reject concurrent changes when the server provides one. Calendar and contact updates replace the complete resource; include all fields you want to retain. Use `calendar_data` or `vcard` with the existing UID to preserve fields outside the structured input, such as recurrence, alarms, attendees, or additional contact properties.
+
+Calendar listing accepts either or both time bounds; omit a bound for an open-ended range. Times must be valid RFC3339 values or compact UTC values such as `20260610T170000Z`. Credentialed DAV requests require HTTPS, including redirects.
+
+Event/contact deletion first verifies that the target is an individual resource of the expected service, then deletes it conditionally using its strong ETag. Collections, missing or ambiguous metadata, and weak or missing ETags are rejected. Delete requests do not follow redirects; legitimate absolute resource hrefs and opaque resource names remain supported.
 
 Contacts CRUD:
 
 ```sh
 icloud contacts contacts list --book /123/carddavhome/card/
-icloud contacts contacts get --book /123/carddavhome/card/ --id person.vcf
 icloud contacts contacts create --book /123/carddavhome/card/ --input-json '{
+  "id": "ada-example",
   "formatted_name": "Ada Lovelace",
   "given_name": "Ada",
   "family_name": "Lovelace",
   "emails": ["ada@example.com"]
 }'
-icloud contacts contacts delete --book /123/carddavhome/card/ --id contact-20260608T120000Z
+icloud contacts contacts get --book /123/carddavhome/card/ --id ada-example
+icloud contacts contacts update --book /123/carddavhome/card/ --id ada-example --input-json '{"formatted_name":"Ada Lovelace","given_name":"Ada","family_name":"Lovelace","emails":["ada@example.com"],"organization":"Example"}'
+icloud contacts contacts delete --book /123/carddavhome/card/ --id ada-example
 ```
 
 Use the address book entry from `contacts books list` whose `resource_types` includes `addressbook`; iCloud may also return collection roots that are not writable address books. Contact IDs may be bare IDs, `.vcf` names, hrefs returned by `contacts list`, or full resource URLs.
 
 ## Testing
 
+Builds require Go 1.25 or newer. CI uses the current stable Go release and runs vet and race tests before building release binaries.
+
 Run the full test suite with workspace-local Go caches:
 
 ```sh
 GOCACHE="$PWD/.gocache" GOMODCACHE="$PWD/.gomodcache" go test ./...
+GOCACHE="$PWD/.gocache" GOMODCACHE="$PWD/.gomodcache" go vet ./...
+GOCACHE="$PWD/.gocache" GOMODCACHE="$PWD/.gomodcache" go test -race ./...
 ```
 
 Build a local binary:

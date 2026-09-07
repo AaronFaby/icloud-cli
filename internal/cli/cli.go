@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"io"
@@ -62,11 +63,18 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int
 		return code
 	}
 	code := output.Success(stdout, service, operation, data)
+	if code != output.ExitOK {
+		logging.Error("command_output_failed", "service", service, "operation", operation, "exit_code", code)
+		return code
+	}
 	logging.Info("command_success", "service", service, "operation", operation, "exit_code", code, "duration_ms", time.Since(start).Milliseconds())
 	return code
 }
 
 func (a app) dispatch() (any, error) {
+	if help := groupHelp(a.args); help != nil {
+		return help, nil
+	}
 	if len(a.args) == 0 {
 		return usage(), nil
 	}
@@ -90,6 +98,45 @@ func (a app) dispatch() (any, error) {
 	default:
 		return nil, output.Validation("unknown_command", "unknown command", map[string]string{"command": a.args[0]})
 	}
+}
+
+func groupHelp(args []string) map[string]any {
+	if len(args) < 2 || (args[len(args)-1] != "--help" && args[len(args)-1] != "-h") {
+		return nil
+	}
+	group := strings.Join(args[:len(args)-1], " ")
+	commands := ""
+	switch group {
+	case "auth":
+		commands = "check save doctor"
+	case "services":
+		commands = "list capabilities"
+	case "log":
+		commands = "status"
+	case "mail":
+		commands = "folders messages batch"
+	case "mail folders":
+		commands = "list create rename delete"
+	case "mail messages":
+		commands = "list get attachment search send reply reply-all forward move copy delete archive flag unflag mark-read mark-unread"
+	case "mail messages attachment":
+		commands = "get"
+	case "mail batch":
+		commands = "move copy delete flag unflag mark-read mark-unread"
+	case "calendar":
+		commands = "calendars events"
+	case "calendar calendars", "contacts books":
+		commands = "list"
+	case "calendar events":
+		commands = "list create update delete"
+	case "contacts":
+		commands = "books contacts"
+	case "contacts contacts":
+		commands = "list get create update delete"
+	default:
+		return nil
+	}
+	return map[string]any{"usage": "icloud " + group + " <command> [flags]", "commands": strings.Fields(commands)}
 }
 
 func (a app) log(args []string) (any, error) {
@@ -127,10 +174,17 @@ func (a app) auth(args []string) (any, error) {
 	case "save":
 		fs := newFlagSet("auth save")
 		configPath := fs.String("config", "", "config path")
-		appleID := fs.String("apple-id", "", "Apple ID")
-		appPassword := fs.String("app-password", "", "app-specific password")
+		appleID := fs.String("apple-id", "", "Apple ID (defaults to ICLOUD_APPLE_ID)")
+		appPassword := fs.String("app-password", "", "app-specific password (prefer ICLOUD_APP_PASSWORD to avoid argv exposure)")
 		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
 			return help, err
+		}
+		// Read secrets after help handling; flag defaults are included in JSON help.
+		if strings.TrimSpace(*appleID) == "" {
+			*appleID = os.Getenv(config.EnvAppleID)
+		}
+		if strings.TrimSpace(*appPassword) == "" {
+			*appPassword = os.Getenv(config.EnvAppPassword)
 		}
 		path, err := config.Save(config.SaveOptions{Path: *configPath, AppleID: *appleID, AppPassword: *appPassword})
 		if err != nil {
@@ -165,6 +219,9 @@ func (a app) services(args []string) (any, error) {
 	}
 	switch args[0] {
 	case "list", "capabilities":
+		if help, err := parseFlags(newFlagSet("services "+args[0]), args[1:]); help != nil || err != nil {
+			return help, err
+		}
 		return icloud.Capabilities(), nil
 	default:
 		return nil, output.Validation("unknown_services_command", "unknown services command", map[string]string{"command": args[0]})
@@ -521,6 +578,11 @@ func (a app) singleMailMutation(args []string) (any, error) {
 
 func (a app) mailBatch(args []string) (any, error) {
 	op := args[0]
+	switch op {
+	case "move", "copy", "delete", "flag", "unflag", "mark-read", "mark-unread":
+	default:
+		return nil, output.Validation("unknown_mail_batch_command", "unknown mail batch command", nil)
+	}
 	fs := newFlagSet("mail batch " + op)
 	configPath := fs.String("config", "", "config path")
 	inputJSON := fs.String("input-json", "", "JSON request or @path")
@@ -651,6 +713,9 @@ func (a app) calendarEvents(args []string) (any, error) {
 		if strings.TrimSpace(*id) == "" {
 			*id = input.ID
 		}
+		if args[0] == "update" && strings.TrimSpace(*id) == "" {
+			return nil, output.Validation("missing_resource_id", "update requires the existing resource id or href", nil)
+		}
 		payload, err := buildCalendarData(input)
 		if err != nil {
 			return nil, err
@@ -660,7 +725,26 @@ func (a app) calendarEvents(args []string) (any, error) {
 			return nil, err
 		}
 		defer cancel()
-		return client.PutEvent(ctx, *calendarHref, *id, payload)
+		if args[0] == "create" {
+			return client.CreateEvent(ctx, *calendarHref, *id, payload)
+		}
+		etag := ""
+		if strings.TrimSpace(input.CalendarData) == "" {
+			existing, err := client.GetEvent(ctx, *calendarHref, *id)
+			if err != nil {
+				return nil, err
+			}
+			etag = existing.ETag
+			input.UID, err = preservedUID(existing.Data, input.UID)
+			if err != nil {
+				return nil, err
+			}
+			payload, err = buildCalendarData(input)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return client.PutEvent(ctx, *calendarHref, *id, payload, etag)
 	case "delete":
 		fs := newFlagSet("calendar events delete")
 		configPath := fs.String("config", "", "config path")
@@ -764,6 +848,9 @@ func (a app) contactResources(args []string) (any, error) {
 		if strings.TrimSpace(*id) == "" {
 			*id = input.ID
 		}
+		if args[0] == "update" && strings.TrimSpace(*id) == "" {
+			return nil, output.Validation("missing_resource_id", "update requires the existing resource id or href", nil)
+		}
 		payload, err := buildVCard(input)
 		if err != nil {
 			return nil, err
@@ -773,7 +860,26 @@ func (a app) contactResources(args []string) (any, error) {
 			return nil, err
 		}
 		defer cancel()
-		return client.PutContact(ctx, *bookHref, *id, payload)
+		if args[0] == "create" {
+			return client.CreateContact(ctx, *bookHref, *id, payload)
+		}
+		etag := ""
+		if strings.TrimSpace(input.VCard) == "" {
+			existing, err := client.GetContact(ctx, *bookHref, *id)
+			if err != nil {
+				return nil, err
+			}
+			etag = existing.ETag
+			input.UID, err = preservedUID(existing.Data, input.UID)
+			if err != nil {
+				return nil, err
+			}
+			payload, err = buildVCard(input)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return client.PutContact(ctx, *bookHref, *id, payload, etag)
 	case "delete":
 		fs := newFlagSet("contacts contacts delete")
 		configPath := fs.String("config", "", "config path")
@@ -804,9 +910,7 @@ func (a app) imapClient(configPath string) (*mail.IMAPClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	return mail.DialIMAP(ctx, cfg)
+	return mail.DialIMAP(context.Background(), cfg)
 }
 
 func (a app) webdavClient(configPath string, baseURL string) (*webdav.Client, context.Context, context.CancelFunc, error) {
@@ -850,18 +954,27 @@ func classify(args []string) (string, string) {
 		return "cli", "help"
 	}
 	service := args[0]
-	var opParts []string
+	switch service {
+	case "auth", "services", "log", "mail", "calendar", "contacts", "drive", "icloud-drive", "icloud_drive", "notes", "reminders", "photos":
+	default:
+		return "cli", "help"
+	}
+	var parts []string
 	for _, arg := range args[1:] {
-		if strings.HasPrefix(arg, "-") {
+		if len(parts) == 3 || strings.HasPrefix(arg, "-") {
 			break
 		}
-		opParts = append(opParts, arg)
+		switch arg {
+		case "check", "save", "doctor", "list", "capabilities", "status", "folders", "messages", "batch", "calendars", "events", "books", "contacts", "attachment", "get", "create", "update", "delete", "rename", "search", "send", "reply", "reply-all", "forward", "move", "copy", "archive", "flag", "unflag", "mark-read", "mark-unread":
+			parts = append(parts, arg)
+		default:
+			return service, "unknown"
+		}
 	}
-	operation := strings.Join(opParts, ".")
-	if operation == "" {
-		operation = "help"
+	if len(parts) == 0 {
+		return service, "help"
 	}
-	return service, operation
+	return service, strings.Join(parts, ".")
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -872,11 +985,29 @@ func newFlagSet(name string) *flag.FlagSet {
 
 func normalizeArgs(args []string) []string {
 	out := make([]string, 0, len(args))
-	for _, arg := range args {
-		if arg == "--json" || arg == "-json" || strings.HasPrefix(arg, "--json=") || strings.HasPrefix(arg, "-json=") {
+	valueNext := false
+	for i, arg := range args {
+		if valueNext {
+			out = append(out, arg)
+			valueNext = false
+			continue
+		}
+		if arg == "--" {
+			return append(out, args[i:]...)
+		}
+		name := strings.TrimLeft(arg, "-")
+		name, _, hasValue := strings.Cut(name, "=")
+		if strings.HasPrefix(arg, "-") && name == "json" {
 			continue
 		}
 		out = append(out, arg)
+		if strings.HasPrefix(arg, "-") && !hasValue {
+			switch name {
+			case "h", "help", "unread", "flagged", "raw-headers", "raw", "attachments", "dry-run", "draft", "permanent":
+			default:
+				valueNext = true
+			}
+		}
 	}
 	return out
 }
@@ -886,7 +1017,10 @@ func parseFlags(fs *flag.FlagSet, args []string) (any, error) {
 		if err == flag.ErrHelp {
 			return commandHelp(fs), nil
 		}
-		return nil, err
+		return nil, output.Validation("invalid_flags", "invalid command flags", err.Error())
+	}
+	if fs.NArg() != 0 {
+		return nil, output.Validation("unexpected_arguments", "unexpected positional arguments; all arguments must be flags", nil)
 	}
 	return nil, nil
 }
@@ -948,16 +1082,46 @@ func resolveCalendarName(ctx context.Context, client *webdav.Client, name string
 	}
 }
 
+// Structured updates retain the stored identity; a resource filename is not a UID.
+func preservedUID(data, requested string) (string, error) {
+	data = strings.ReplaceAll(normalizeLines(data), "\r\n ", "")
+	data = strings.ReplaceAll(data, "\r\n\t", "")
+	uid := ""
+	for _, line := range strings.Split(data, "\r\n") {
+		name, value, ok := strings.Cut(line, ":")
+		name, _, _ = strings.Cut(name, ";")
+		if !ok || !strings.EqualFold(name, "UID") {
+			continue
+		}
+		value = strings.NewReplacer(`\n`, "\n", `\N`, "\n", `\,`, ",", `\;`, ";", `\\`, `\`).Replace(value)
+		if uid != "" && uid != value {
+			return "", output.Validation("ambiguous_resource_uid", "resource contains multiple UIDs; provide a raw replacement payload", nil)
+		}
+		uid = value
+	}
+	if strings.TrimSpace(uid) == "" {
+		return "", output.Validation("missing_resource_uid", "existing resource has no UID; provide a raw replacement payload", nil)
+	}
+	if requested != "" && requested != uid {
+		return "", output.Validation("resource_uid_mismatch", "structured updates must preserve the existing resource UID", nil)
+	}
+	return uid, nil
+}
+
 func buildCalendarData(input eventInput) (string, error) {
 	if strings.TrimSpace(input.CalendarData) != "" {
 		return normalizeLines(input.CalendarData), nil
 	}
-	uid := firstNonEmpty(input.UID, input.ID, "event-"+time.Now().UTC().Format("20060102T150405Z"))
+	uid := firstNonEmpty(input.UID, input.ID, "event-"+rand.Text())
 	if strings.TrimSpace(input.Summary) == "" {
 		return "", output.Validation("missing_event_summary", "event summary is required when calendar_data is not provided", nil)
 	}
 	if strings.TrimSpace(input.Start) == "" || strings.TrimSpace(input.End) == "" {
 		return "", output.Validation("missing_event_time", "event start and end are required when calendar_data is not provided", nil)
+	}
+	start, end, err := webdav.CalendarRange(input.Start, input.End)
+	if err != nil {
+		return "", err
 	}
 	lines := []string{
 		"BEGIN:VCALENDAR",
@@ -966,8 +1130,8 @@ func buildCalendarData(input eventInput) (string, error) {
 		"BEGIN:VEVENT",
 		"UID:" + escapeICal(uid),
 		"DTSTAMP:" + time.Now().UTC().Format("20060102T150405Z"),
-		"DTSTART:" + formatICalTime(input.Start),
-		"DTEND:" + formatICalTime(input.End),
+		"DTSTART:" + start,
+		"DTEND:" + end,
 		"SUMMARY:" + escapeICal(input.Summary),
 	}
 	if strings.TrimSpace(input.Description) != "" {
@@ -991,7 +1155,7 @@ func buildVCard(input contactInput) (string, error) {
 	if fn == "" {
 		return "", output.Validation("missing_contact_name", "formatted_name is required when vcard is not provided", nil)
 	}
-	uid := firstNonEmpty(input.UID, input.ID, "contact-"+time.Now().UTC().Format("20060102T150405Z"))
+	uid := firstNonEmpty(input.UID, input.ID, "contact-"+rand.Text())
 	lines := []string{
 		"BEGIN:VCARD",
 		"VERSION:3.0",
@@ -1020,14 +1184,6 @@ func buildVCard(input contactInput) (string, error) {
 	return strings.Join(lines, "\r\n"), nil
 }
 
-func formatICalTime(s string) string {
-	s = strings.TrimSpace(s)
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UTC().Format("20060102T150405Z")
-	}
-	return strings.NewReplacer("-", "", ":", "", ".", "").Replace(s)
-}
-
 func escapeICal(s string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, "\n", `\n`, "\r", "", ";", `\;`, ",", `\,`)
 	return replacer.Replace(s)
@@ -1047,7 +1203,7 @@ func normalizeLines(s string) string {
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+			return value
 		}
 	}
 	return ""

@@ -11,11 +11,13 @@ import (
 	"mime"
 	"net"
 	netmail "net/mail"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
+
+	"golang.org/x/net/html/charset"
 
 	"github.com/aaronfaby/icloud-cli/internal/config"
 	"github.com/aaronfaby/icloud-cli/internal/logging"
@@ -23,16 +25,22 @@ import (
 )
 
 const (
-	DefaultIMAPHost = "imap.mail.me.com:993"
-	DefaultTrash    = "Trash"
-	DefaultArchive  = "Archive"
+	DefaultIMAPHost      = "imap.mail.me.com:993"
+	DefaultTrash         = "Trash"
+	DefaultArchive       = "Archive"
+	maxIMAPLineBytes     = 1 << 20
+	maxIMAPResponseBytes = 64 << 20
+	maxIMAPResponseLines = 100000
 )
 
 type IMAPClient struct {
-	conn net.Conn
-	r    *bufio.Reader
-	w    *bufio.Writer
-	tag  int
+	conn       net.Conn
+	r          *bufio.Reader
+	w          *bufio.Writer
+	tag        int
+	ctx        context.Context
+	cancel     context.CancelFunc
+	stopCancel func() bool
 }
 
 type imapResponse struct {
@@ -42,24 +50,42 @@ type imapResponse struct {
 
 func DialIMAP(ctx context.Context, cfg config.Config) (*IMAPClient, error) {
 	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	connected := false
+	defer func() {
+		if !connected {
+			cancel()
+		}
+	}()
 	logging.Info("imap_connect_start", "host", DefaultIMAPHost)
 	dialer := &net.Dialer{Timeout: 20 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", DefaultIMAPHost, &tls.Config{ServerName: "imap.mail.me.com", MinVersion: tls.VersionTLS12})
+	tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: "imap.mail.me.com", MinVersion: tls.VersionTLS12}}
+	conn, err := tlsDialer.DialContext(ctx, "tcp", DefaultIMAPHost)
 	if err != nil {
 		logging.Error("imap_connect_failed", "host", DefaultIMAPHost, "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return nil, output.Remote("imap_connect_failed", "failed to connect to iCloud IMAP", err.Error())
 	}
-	c := &IMAPClient{conn: conn, r: bufio.NewReader(conn), w: bufio.NewWriter(conn)}
-	if _, err := c.r.ReadString('\n'); err != nil {
+	c := &IMAPClient{conn: conn, r: bufio.NewReader(conn), w: bufio.NewWriter(conn), ctx: ctx, cancel: cancel}
+	c.stopCancel = context.AfterFunc(ctx, func() { _ = conn.Close() })
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	greeting, err := c.readIMAPLine()
+	if err != nil {
 		_ = conn.Close()
 		logging.Error("imap_greeting_failed", "host", DefaultIMAPHost, "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
 		return nil, output.Remote("imap_greeting_failed", "failed to read iCloud IMAP greeting", err.Error())
+	}
+	if !strings.HasPrefix(strings.ToUpper(greeting), "* OK ") && !strings.EqualFold(strings.TrimSpace(greeting), "* OK") {
+		_ = c.Close()
+		return nil, output.Remote("imap_greeting_failed", "unexpected iCloud IMAP greeting", nil)
 	}
 	if err := c.Login(ctx, cfg.AppleID, cfg.AppPassword); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
 	logging.Info("imap_connect_success", "host", DefaultIMAPHost, "duration_ms", time.Since(start).Milliseconds())
+	connected = true
 	return c, nil
 }
 
@@ -67,17 +93,33 @@ func (c *IMAPClient) Close() error {
 	if c == nil || c.conn == nil {
 		return nil
 	}
-	_, _ = c.command("LOGOUT")
+	// Closing the transport needs no round trip and cannot hang on a stalled LOGOUT.
+	if c.stopCancel != nil {
+		c.stopCancel()
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
 	logging.Info("imap_close")
 	return c.conn.Close()
 }
 
-func (c *IMAPClient) Login(_ context.Context, appleID, appPassword string) error {
+func (c *IMAPClient) Login(ctx context.Context, appleID, appPassword string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = c.conn.Close() })
+	defer stop()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := c.conn.SetDeadline(deadline); err != nil {
+			return err
+		}
+	}
 	start := time.Now()
 	_, err := c.command("LOGIN %s %s", quote(appleID), quote(appPassword))
 	if err != nil {
 		logging.Warn("imap_login_failed", "duration_ms", time.Since(start).Milliseconds())
-		return output.Auth("imap_login_failed", "iCloud IMAP login failed", redactIMAPError(err.Error()))
+		return output.Auth("imap_login_failed", "iCloud IMAP login failed", err.Error())
 	}
 	logging.Info("imap_login_success", "duration_ms", time.Since(start).Milliseconds())
 	return nil
@@ -89,11 +131,21 @@ func (c *IMAPClient) ListFolders() ([]Folder, error) {
 		return nil, output.Remote("imap_list_failed", "failed to list mail folders", err.Error())
 	}
 	var folders []Folder
+	literalIndex := 0
 	for _, line := range resp.Lines {
-		if !strings.HasPrefix(line, "* LIST ") {
+		var literals []string
+		if _, ok := literalSize(line); ok && literalIndex < len(resp.Literals) {
+			literals = resp.Literals[literalIndex : literalIndex+1]
+			literalIndex++
+		}
+		if !strings.HasPrefix(strings.ToUpper(line), "* LIST ") {
 			continue
 		}
-		folders = append(folders, parseFolder(line))
+		folder := parseFolder(line, literals...)
+		if folder.Name == "" {
+			return nil, output.Remote("imap_list_failed", "invalid IMAP LIST response", nil)
+		}
+		folders = append(folders, folder)
 	}
 	logging.Info("imap_folders_listed", "count", len(folders))
 	return folders, nil
@@ -102,6 +154,11 @@ func (c *IMAPClient) ListFolders() ([]Folder, error) {
 func (c *IMAPClient) AppendMessage(folder string, flags []string, date time.Time, msg []byte) error {
 	if strings.TrimSpace(folder) == "" {
 		return output.Validation("missing_folder", "folder is required", nil)
+	}
+	for _, flag := range flags {
+		if err := validateIMAPFlag(flag); err != nil {
+			return err
+		}
 	}
 	flagsPart := ""
 	if len(flags) > 0 {
@@ -112,7 +169,7 @@ func (c *IMAPClient) AppendMessage(folder string, flags []string, date time.Time
 		datePart = " " + quote(date.Format("02-Jan-2006 15:04:05 -0700"))
 	}
 	msg = ensureCRLF(msg)
-	_, err := c.commandLiteral("APPEND %s%s%s {%d}", msg, quote(folder), flagsPart, datePart, len(msg))
+	_, err := c.commandLiteral("APPEND %s%s%s {%d}", msg, quoteMailbox(folder), flagsPart, datePart, len(msg))
 	if err != nil {
 		logging.Error("imap_append_failed", "folder", folder, "bytes", len(msg), "error", err.Error())
 		return output.Remote("imap_append_failed", "failed to append mail message", err.Error())
@@ -125,7 +182,7 @@ func (c *IMAPClient) CreateFolder(name string) error {
 	if strings.TrimSpace(name) == "" {
 		return output.Validation("missing_folder_name", "folder name is required", nil)
 	}
-	_, err := c.command("CREATE %s", quote(name))
+	_, err := c.command("CREATE %s", quoteMailbox(name))
 	if err != nil {
 		logging.Error("imap_create_folder_failed", "error", err.Error())
 		return output.Remote("imap_create_folder_failed", "failed to create mail folder", err.Error())
@@ -138,7 +195,7 @@ func (c *IMAPClient) RenameFolder(folder, name string) error {
 	if strings.TrimSpace(folder) == "" || strings.TrimSpace(name) == "" {
 		return output.Validation("missing_folder_name", "source and destination folder names are required", nil)
 	}
-	_, err := c.command("RENAME %s %s", quote(folder), quote(name))
+	_, err := c.command("RENAME %s %s", quoteMailbox(folder), quoteMailbox(name))
 	if err != nil {
 		logging.Error("imap_rename_folder_failed", "error", err.Error())
 		return output.Remote("imap_rename_folder_failed", "failed to rename mail folder", err.Error())
@@ -151,7 +208,7 @@ func (c *IMAPClient) DeleteFolder(folder string) error {
 	if strings.TrimSpace(folder) == "" {
 		return output.Validation("missing_folder", "folder is required", nil)
 	}
-	_, err := c.command("DELETE %s", quote(folder))
+	_, err := c.command("DELETE %s", quoteMailbox(folder))
 	if err != nil {
 		logging.Error("imap_delete_folder_failed", "error", err.Error())
 		return output.Remote("imap_delete_folder_failed", "failed to delete mail folder", err.Error())
@@ -166,7 +223,16 @@ func (c *IMAPClient) ListMessages(folder string, limit int) ([]MessageSummary, e
 
 func (c *IMAPClient) ListMessagesWithOptions(opts MessageListOptions) ([]MessageSummary, error) {
 	folder := defaultFolder(opts.Folder)
-	ids, err := c.Search(folder, buildSearchCriteria(opts))
+	var ids []string
+	var err error
+	if !isASCII(opts.From) {
+		from := strings.TrimSpace(opts.From)
+		filters := opts
+		filters.From = ""
+		ids, err = c.search(folder, buildSearchCriteria(filters)+" FROM", &from)
+	} else {
+		ids, err = c.Search(folder, buildSearchCriteria(opts))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -185,25 +251,50 @@ func (c *IMAPClient) ListMessagesWithOptions(opts MessageListOptions) ([]Message
 }
 
 func (c *IMAPClient) Search(folder, query string) ([]string, error) {
-	if strings.TrimSpace(folder) == "" {
-		folder = "INBOX"
-	}
-	if err := c.selectFolder(folder); err != nil {
+	if err := validateIMAPLine(query); err != nil {
 		return nil, err
 	}
 	criteria := strings.TrimSpace(query)
 	if criteria == "" {
 		criteria = "ALL"
 	} else if !looksLikeIMAPCriteria(criteria) {
+		if !isASCII(criteria) {
+			return c.search(defaultFolder(folder), "TEXT", &criteria)
+		}
 		criteria = "TEXT " + quote(criteria)
 	}
-	resp, err := c.command("UID SEARCH %s", criteria)
+	if !isASCII(criteria) {
+		return nil, output.Validation("unsupported_search_charset", "non-ASCII raw IMAP criteria are unsupported; use plain-text search or the --from list filter", nil)
+	}
+	return c.search(defaultFolder(folder), criteria, nil)
+}
+
+func (c *IMAPClient) search(folder, criteria string, literal *string) ([]string, error) {
+	if err := validateIMAPLine(criteria); err != nil {
+		return nil, err
+	}
+	if literal != nil {
+		if err := validateIMAPLine(*literal); err != nil {
+			return nil, err
+		}
+	}
+	if err := c.selectFolder(folder); err != nil {
+		return nil, err
+	}
+	var resp imapResponse
+	var err error
+	if literal != nil {
+		resp, err = c.commandLiteral("UID SEARCH CHARSET UTF-8 %s {%d}", []byte(*literal), criteria, len(*literal))
+	} else {
+		resp, err = c.command("UID SEARCH %s", criteria)
+	}
 	if err != nil {
 		logging.Error("imap_search_failed", "folder", folder, "error", err.Error())
 		return nil, output.Remote("imap_search_failed", "failed to search mail", err.Error())
 	}
 	for _, line := range resp.Lines {
-		if strings.HasPrefix(line, "* SEARCH") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "*" && strings.EqualFold(fields[1], "SEARCH") {
 			ids := parseSearch(line)
 			logging.Info("imap_search_completed", "folder", folder, "count", len(ids))
 			return ids, nil
@@ -237,10 +328,11 @@ func (c *IMAPClient) FetchMessageWithOptions(folder, id string, opts FetchOption
 		logging.Error("imap_fetch_failed", "folder", folder, "id", id, "include_raw", opts.IncludeRaw, "error", err.Error())
 		return Message{}, output.Remote("imap_fetch_failed", "failed to fetch mail message", err.Error())
 	}
-	msg := parseFetch(folder, id, resp, opts)
-	if msg.ID == "" {
-		msg.ID = id
+	resp, found := requestedFetch(resp, id)
+	if !found {
+		return Message{}, output.Remote("message_not_found", "mail message was not found", map[string]string{"id": id})
 	}
+	msg := parseFetch(folder, id, resp, opts)
 	raw := ""
 	if wantsFullMessage(opts) && len(resp.Literals) > 0 {
 		raw = resp.Literals[len(resp.Literals)-1]
@@ -256,16 +348,18 @@ func (c *IMAPClient) FetchMessageWithOptions(folder, id string, opts FetchOption
 		}
 	}
 	if raw != "" && (opts.BodyMode != "" || opts.IncludeAttachments) {
-		if content, err := parseMessageContent(raw); err == nil {
-			switch opts.BodyMode {
-			case "text":
-				msg.Body = content.Text
-			case "html":
-				msg.HTML = content.HTML
-			}
-			if opts.IncludeAttachments {
-				msg.Attachments = content.Attachments
-			}
+		content, err := parseMessageContent(raw)
+		if err != nil {
+			return Message{}, output.Remote("message_parse_failed", "failed to parse mail message", err.Error())
+		}
+		switch opts.BodyMode {
+		case "text":
+			msg.Body = content.Text
+		case "html":
+			msg.HTML = content.HTML
+		}
+		if opts.IncludeAttachments {
+			msg.Attachments = content.Attachments
 		}
 	}
 	logging.Info("imap_message_fetched", "folder", folder, "id", id, "include_raw", opts.IncludeRaw, "body_mode", opts.BodyMode, "include_attachments", opts.IncludeAttachments, "raw_bytes", len(msg.Raw), "body_bytes", len(msg.Body))
@@ -305,12 +399,12 @@ func (c *IMAPClient) Move(folder, id, toFolder string) error {
 	if err := c.selectFolder(defaultFolder(folder)); err != nil {
 		return err
 	}
-	_, err = c.command("UID MOVE %s %s", id, quote(toFolder))
+	_, err = c.command("UID MOVE %s %s", id, quoteMailbox(toFolder))
 	if err == nil {
 		logging.Info("imap_message_moved", "folder", folder, "id", id)
 		return nil
 	}
-	if _, copyErr := c.command("UID COPY %s %s", id, quote(toFolder)); copyErr != nil {
+	if _, copyErr := c.command("UID COPY %s %s", id, quoteMailbox(toFolder)); copyErr != nil {
 		logging.Error("imap_move_failed", "folder", folder, "id", id, "error", err.Error())
 		return output.Remote("imap_move_failed", "failed to move mail message", err.Error())
 	}
@@ -339,7 +433,7 @@ func (c *IMAPClient) Copy(folder, id, toFolder string) error {
 	if err := c.selectFolder(defaultFolder(folder)); err != nil {
 		return err
 	}
-	if _, err := c.command("UID COPY %s %s", id, quote(toFolder)); err != nil {
+	if _, err := c.command("UID COPY %s %s", id, quoteMailbox(toFolder)); err != nil {
 		logging.Error("imap_copy_failed", "folder", folder, "id", id, "error", err.Error())
 		return output.Remote("imap_copy_failed", "failed to copy mail message", err.Error())
 	}
@@ -399,6 +493,9 @@ func (c *IMAPClient) Archive(folder, id, archiveFolder string) error {
 }
 
 func (c *IMAPClient) SetFlag(folder, id, flag string, enable bool) error {
+	if err := validateIMAPFlag(flag); err != nil {
+		return err
+	}
 	id, err := validateUID(id)
 	if err != nil {
 		return err
@@ -419,7 +516,7 @@ func (c *IMAPClient) SetFlag(folder, id, flag string, enable bool) error {
 }
 
 func (c *IMAPClient) selectFolder(folder string) error {
-	_, err := c.command("SELECT %s", quote(folder))
+	_, err := c.command("SELECT %s", quoteMailbox(folder))
 	if err != nil {
 		logging.Error("imap_select_failed", "folder", folder, "error", err.Error())
 		return output.Remote("imap_select_failed", "failed to select mail folder", err.Error())
@@ -429,9 +526,17 @@ func (c *IMAPClient) selectFolder(folder string) error {
 }
 
 func (c *IMAPClient) command(format string, args ...any) (imapResponse, error) {
+	line := fmt.Sprintf(format, args...)
+	if err := validateIMAPLine(line); err != nil {
+		return imapResponse{}, err
+	}
+	if c.ctx != nil {
+		if err := c.ctx.Err(); err != nil {
+			return imapResponse{}, err
+		}
+	}
 	c.tag++
 	tag := fmt.Sprintf("A%04d", c.tag)
-	line := fmt.Sprintf(format, args...)
 	if _, err := fmt.Fprintf(c.w, "%s %s\r\n", tag, line); err != nil {
 		return imapResponse{}, err
 	}
@@ -448,33 +553,51 @@ func (c *IMAPClient) command(format string, args ...any) (imapResponse, error) {
 		return resp, fmt.Errorf("empty IMAP response")
 	}
 	last := resp.Lines[len(resp.Lines)-1]
-	if !strings.HasPrefix(last, tag+" OK") {
+	if fields := strings.Fields(last); len(fields) < 2 || fields[0] != tag || !strings.EqualFold(fields[1], "OK") {
 		logging.Warn("imap_command_rejected", "command", imapCommandName(line), "line_count", len(resp.Lines), "literal_count", len(resp.Literals))
-		return resp, fmt.Errorf("%s", last)
+		return resp, fmt.Errorf("IMAP %s rejected by server", imapCommandName(line))
 	}
 	logging.Info("imap_command_ok", "command", imapCommandName(line), "line_count", len(resp.Lines), "literal_count", len(resp.Literals))
 	return resp, nil
 }
 
 func (c *IMAPClient) commandLiteral(format string, literal []byte, args ...any) (imapResponse, error) {
+	line := fmt.Sprintf(format, args...)
+	if err := validateIMAPLine(line); err != nil {
+		return imapResponse{}, err
+	}
+	if c.ctx != nil {
+		if err := c.ctx.Err(); err != nil {
+			return imapResponse{}, err
+		}
+	}
 	c.tag++
 	tag := fmt.Sprintf("A%04d", c.tag)
-	line := fmt.Sprintf(format, args...)
 	if _, err := fmt.Fprintf(c.w, "%s %s\r\n", tag, line); err != nil {
 		return imapResponse{}, err
 	}
 	if err := c.w.Flush(); err != nil {
 		return imapResponse{}, err
 	}
-	continuation, err := c.r.ReadString('\n')
-	if err != nil {
-		logging.Error("imap_literal_continuation_failed", "command", imapCommandName(line), "error", err.Error())
-		return imapResponse{}, err
-	}
-	continuation = strings.TrimRight(continuation, "\r\n")
-	if !strings.HasPrefix(continuation, "+") {
-		logging.Warn("imap_literal_rejected", "command", imapCommandName(line))
-		return imapResponse{Lines: []string{continuation}}, fmt.Errorf("%s", continuation)
+	pendingBytes, pendingLines := 0, 0
+	for {
+		continuation, err := c.readIMAPLine()
+		if err != nil {
+			return imapResponse{}, err
+		}
+		pendingBytes += len(continuation)
+		pendingLines++
+		if pendingBytes > maxIMAPResponseBytes || pendingLines > maxIMAPResponseLines {
+			_ = c.Close()
+			return imapResponse{}, fmt.Errorf("IMAP continuation response exceeds size limit")
+		}
+		if strings.HasPrefix(continuation, "+") {
+			break
+		}
+		if strings.HasPrefix(continuation, "* ") && !strings.HasPrefix(strings.ToUpper(continuation), "* BYE") {
+			continue
+		}
+		return imapResponse{}, fmt.Errorf("IMAP literal rejected by server")
 	}
 	if _, err := c.w.Write(literal); err != nil {
 		return imapResponse{}, err
@@ -495,9 +618,9 @@ func (c *IMAPClient) commandLiteral(format string, literal []byte, args ...any) 
 		return resp, fmt.Errorf("empty IMAP response")
 	}
 	last := resp.Lines[len(resp.Lines)-1]
-	if !strings.HasPrefix(last, tag+" OK") {
+	if fields := strings.Fields(last); len(fields) < 2 || fields[0] != tag || !strings.EqualFold(fields[1], "OK") {
 		logging.Warn("imap_literal_command_rejected", "command", imapCommandName(line), "line_count", len(resp.Lines), "literal_count", len(resp.Literals))
-		return resp, fmt.Errorf("%s", last)
+		return resp, fmt.Errorf("IMAP %s rejected by server", imapCommandName(line))
 	}
 	logging.Info("imap_literal_command_ok", "command", imapCommandName(line), "line_count", len(resp.Lines), "literal_count", len(resp.Literals), "literal_bytes", len(literal))
 	return resp, nil
@@ -514,28 +637,120 @@ func imapCommandName(line string) string {
 	return strings.ToUpper(fields[0])
 }
 
+func (c *IMAPClient) readIMAPLine() (string, error) {
+	var line strings.Builder
+	for {
+		fragment, err := c.r.ReadSlice('\n')
+		if line.Len()+len(fragment) > maxIMAPLineBytes {
+			_ = c.Close()
+			return "", fmt.Errorf("IMAP response line exceeds 1 MiB")
+		}
+		line.Write(fragment)
+		if err != bufio.ErrBufferFull {
+			return line.String(), err
+		}
+	}
+}
+
 func (c *IMAPClient) readUntilTag(tag string) (imapResponse, error) {
 	resp := imapResponse{}
+	total := 0
 	for {
-		line, err := c.r.ReadString('\n')
+		line, err := c.readIMAPLine()
 		if err != nil {
 			return resp, err
 		}
+		total += len(line)
+		if total > maxIMAPResponseBytes || len(resp.Lines) >= maxIMAPResponseLines {
+			_ = c.Close()
+			return resp, fmt.Errorf("IMAP response exceeds size limit")
+		}
 		line = strings.TrimRight(line, "\r\n")
 		resp.Lines = append(resp.Lines, line)
-		if n, ok := literalSize(line); ok {
-			data := make([]byte, n)
-			if _, err := io.ReadFull(c.r, data); err != nil {
+		n, literal := literalSize(line)
+		if !literal && strings.HasSuffix(line, "}") && strings.Contains(line, "{") {
+			_ = c.Close()
+			return resp, fmt.Errorf("invalid IMAP literal size")
+		}
+		if literal {
+			if n > maxMessageBytes || n > maxIMAPResponseBytes-total {
+				_ = c.Close()
+				return resp, fmt.Errorf("IMAP literal or response exceeds size limit")
+			}
+			total += n
+			var data strings.Builder
+			data.Grow(n)
+			if _, err := io.CopyN(&data, c.r, int64(n)); err != nil {
 				return resp, err
 			}
 			// Keep literals only in Literals — never in Lines. Message bodies can
 			// contain substrings like "FLAGS (" that would confuse protocol parsers.
-			resp.Literals = append(resp.Literals, string(data))
+			resp.Literals = append(resp.Literals, data.String())
 		}
 		if strings.HasPrefix(line, tag+" ") {
 			return resp, nil
 		}
 	}
+}
+
+func validateIMAPLine(line string) error {
+	if strings.ContainsAny(line, "\r\n\x00") || !utf8.ValidString(line) {
+		return output.Validation("invalid_imap_command", "IMAP command values cannot contain NUL, line breaks, or invalid UTF-8", nil)
+	}
+	return nil
+}
+
+func quoteMailbox(name string) string {
+	// Leave invalid input visible to the shared command validator; never encode it away.
+	if validateIMAPLine(name) != nil {
+		return quote(name)
+	}
+	return quote(encodeModifiedUTF7(name))
+}
+
+func encodeModifiedUTF7(name string) string {
+	var out strings.Builder
+	var nonASCII []rune
+	flush := func() {
+		if len(nonASCII) == 0 {
+			return
+		}
+		var data []byte
+		for _, word := range utf16.Encode(nonASCII) {
+			data = append(data, byte(word>>8), byte(word))
+		}
+		out.WriteByte('&')
+		out.WriteString(strings.ReplaceAll(base64.RawStdEncoding.EncodeToString(data), "/", ","))
+		out.WriteByte('-')
+		nonASCII = nonASCII[:0]
+	}
+	for _, r := range name {
+		if r >= 0x20 && r <= 0x7e {
+			flush()
+			if r == '&' {
+				out.WriteString("&-")
+			} else {
+				out.WriteRune(r)
+			}
+		} else {
+			nonASCII = append(nonASCII, r)
+		}
+	}
+	flush()
+	return out.String()
+}
+
+func validateIMAPFlag(flag string) error {
+	atom := strings.TrimPrefix(flag, `\`)
+	if atom == "" {
+		return output.Validation("invalid_flag", "IMAP flag must be a single atom", nil)
+	}
+	for _, r := range atom {
+		if r <= 0x20 || r >= 0x7f || strings.ContainsRune(`(){%*"\]`, r) {
+			return output.Validation("invalid_flag", "IMAP flag must be a single atom", nil)
+		}
+	}
+	return nil
 }
 
 func quote(s string) string {
@@ -550,46 +765,225 @@ func literalSize(line string) (int, bool) {
 		return 0, false
 	}
 	n, err := strconv.Atoi(line[start+1 : len(line)-1])
-	return n, err == nil
+	return n, err == nil && n >= 0
 }
 
-func parseFolder(line string) Folder {
-	flags := parseParen(line)
-	quoted := quotedValues(line)
-	f := Folder{Flags: flags}
-	if len(quoted) >= 2 {
-		f.Delimiter = quoted[len(quoted)-2]
-		f.Name = decodeModifiedUTF7(quoted[len(quoted)-1])
-	} else if len(quoted) == 1 {
-		f.Name = decodeModifiedUTF7(quoted[0])
+func parseFolder(line string, literals ...string) Folder {
+	f := Folder{Flags: parseParen(line)}
+	end := strings.IndexByte(line, ')')
+	if end < 0 {
+		return f
+	}
+	delimiter, rest, ok := imapString(line[end+1:], &literals)
+	if !ok {
+		return f
+	}
+	if token := strings.Fields(line[end+1:]); len(token) > 0 && !strings.EqualFold(token[0], "NIL") {
+		f.Delimiter = delimiter
+	}
+	name, _, ok := imapString(rest, &literals)
+	if ok {
+		f.Name = decodeModifiedUTF7(name)
 	}
 	return f
 }
 
+// imapString reads a quoted string, literal, or atom without losing its boundary.
+func imapString(s string, literals *[]string) (string, string, bool) {
+	s = strings.TrimLeft(s, " \t")
+	if s == "" {
+		return "", "", false
+	}
+	if s[0] == '"' {
+		var value strings.Builder
+		for i := 1; i < len(s); i++ {
+			if s[i] == '"' {
+				return value.String(), s[i+1:], true
+			}
+			if s[i] == '\\' {
+				i++
+				if i == len(s) {
+					break
+				}
+			}
+			value.WriteByte(s[i])
+		}
+		return "", "", false
+	}
+	if _, ok := literalSize(s); ok {
+		if len(*literals) == 0 {
+			return "", "", false
+		}
+		value := (*literals)[0]
+		*literals = (*literals)[1:]
+		return value, "", true
+	}
+	end := strings.IndexAny(s, " \t")
+	if end < 0 {
+		return s, "", true
+	}
+	return s[:end], s[end:], true
+}
+
 func parseSearch(line string) []string {
-	parts := strings.Fields(strings.TrimPrefix(line, "* SEARCH"))
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return nil
+	}
+	parts = parts[2:]
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if _, err := strconv.Atoi(p); err == nil {
-			out = append(out, p)
+		if id, err := validateUID(p); err == nil {
+			out = append(out, id)
 		}
 	}
 	return out
 }
 
-func parseFetch(folder, fallbackID string, resp imapResponse, opts FetchOptions) Message {
-	msg := Message{MessageSummary: MessageSummary{ID: fallbackID, Folder: folder}}
-	// resp.Lines contains protocol lines only (literals live in resp.Literals).
-	for _, line := range resp.Lines {
-		if strings.Contains(line, "FETCH") || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
-			msg.ID = firstSubmatch(`UID ([0-9]+)`, line, msg.ID)
-			msg.InternalDate = firstSubmatch(`INTERNALDATE "([^"]+)"`, line, msg.InternalDate)
-			if size := firstSubmatch(`RFC822\.SIZE ([0-9]+)`, line, ""); size != "" {
-				msg.Size, _ = strconv.Atoi(size)
+// IMAP attributes are name/value pairs. Parenthesized flags and quoted strings
+// are single values, so their contents cannot masquerade as UID or size metadata.
+func imapToken(s string) (string, string, bool) {
+	s = strings.TrimLeft(s, " \t\r\n")
+	if s == "" || s[0] == ')' {
+		return "", s, false
+	}
+	paren, bracket := 0, 0
+	bodySection := strings.HasPrefix(strings.ToUpper(s), "BODY[")
+	quoted, escaped := false, false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				quoted = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			quoted = true
+		case '[':
+			if bodySection {
+				bracket++
+			}
+		case ']':
+			if bodySection {
+				bracket--
+			}
+		case '(':
+			paren++
+		case ')':
+			if paren == 0 && bracket == 0 {
+				return s[:i], s[i:], i > 0
+			}
+			paren--
+		case ' ', '\t', '\r', '\n':
+			if paren == 0 && bracket == 0 {
+				return s[:i], s[i:], true
 			}
 		}
-		if flags := parseFlags(line); len(flags) > 0 {
-			msg.Flags = flags
+		if paren < 0 || bracket < 0 {
+			return "", s, false
+		}
+	}
+	return s, "", !quoted && paren == 0 && bracket == 0
+}
+
+func fetchAttributes(lines []string) map[string]string {
+	attrs := map[string]string{}
+	protocol := strings.Join(lines, " ")
+	start := strings.IndexByte(protocol, '(')
+	if start < 0 {
+		return attrs
+	}
+	protocol = protocol[start+1:]
+	for {
+		name, rest, ok := imapToken(protocol)
+		if !ok {
+			break
+		}
+		value, rest, ok := imapToken(rest)
+		if !ok {
+			break
+		}
+		attrs[strings.ToUpper(name)] = value
+		protocol = rest
+	}
+	return attrs
+}
+
+func fetchAttributeGroups(lines []string) []map[string]string {
+	var groups []map[string]string
+	var current []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "* ") && len(current) > 0 {
+			groups = append(groups, fetchAttributes(current))
+			current = nil
+		}
+		current = append(current, line)
+	}
+	if len(current) > 0 {
+		groups = append(groups, fetchAttributes(current))
+	}
+	return groups
+}
+
+// requestedFetch groups each untagged FETCH with its continuations and literals.
+// Unsolicited responses for other UIDs must never supply this message's metadata.
+func requestedFetch(resp imapResponse, id string) (imapResponse, bool) {
+	var selected, current imapResponse
+	found := false
+	finish := func() {
+		attrs := fetchAttributes(current.Lines)
+		if attrs["UID"] == id {
+			_, full := attrs["BODY[]"]
+			_, header := attrs["BODY[HEADER]"]
+			found = found || full || header
+			selected.Lines = append(selected.Lines, current.Lines...)
+			selected.Literals = append(selected.Literals, current.Literals...)
+		}
+		current = imapResponse{}
+	}
+	literalIndex := 0
+	for _, line := range resp.Lines {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == "*" || len(fields) > 1 && (strings.EqualFold(fields[1], "OK") || strings.EqualFold(fields[1], "NO") || strings.EqualFold(fields[1], "BAD")) {
+			finish()
+		}
+		if len(fields) >= 3 && fields[0] == "*" && strings.EqualFold(fields[2], "FETCH") || len(current.Lines) > 0 {
+			current.Lines = append(current.Lines, line)
+		}
+		if _, ok := literalSize(line); ok && literalIndex < len(resp.Literals) {
+			if len(current.Lines) > 0 {
+				current.Literals = append(current.Literals, resp.Literals[literalIndex])
+			}
+			literalIndex++
+		}
+	}
+	finish()
+	return selected, found
+}
+
+func parseFetch(folder, id string, resp imapResponse, opts FetchOptions) Message {
+	resp, found := requestedFetch(resp, id)
+	msg := Message{MessageSummary: MessageSummary{Folder: folder}}
+	if !found {
+		return msg
+	}
+	msg.ID = id
+	for _, attrs := range fetchAttributeGroups(resp.Lines) {
+		if date, exists := attrs["INTERNALDATE"]; exists {
+			literals := []string(nil)
+			msg.InternalDate, _, _ = imapString(date, &literals)
+		}
+		if size, exists := attrs["RFC822.SIZE"]; exists {
+			msg.Size, _ = strconv.Atoi(size)
+		}
+		if flags, exists := attrs["FLAGS"]; exists {
+			msg.Flags = parseParen(flags)
 		}
 	}
 	if len(resp.Literals) > 0 {
@@ -612,7 +1006,7 @@ func applyHeaders(summary *MessageSummary, header netmail.Header, includeRaw boo
 	rawReplyTo := header.Get("Reply-To")
 	rawDate := header.Get("Date")
 	summary.Subject = decodeHeaderValue(rawSubject)
-	summary.From = decodeHeaderValue(rawFrom)
+	summary.From = strings.Join(splitAddressList(rawFrom), ", ")
 	summary.Date = rawDate
 	summary.References = strings.TrimSpace(header.Get("References"))
 	summary.MessageID = header.Get("Message-Id")
@@ -643,44 +1037,6 @@ func parseParen(line string) []string {
 		return nil
 	}
 	return strings.Fields(line[start+1 : end])
-}
-
-func parseFlags(line string) []string {
-	idx := strings.Index(line, "FLAGS (")
-	if idx < 0 {
-		return nil
-	}
-	start := idx + len("FLAGS (")
-	end := strings.Index(line[start:], ")")
-	if end < 0 {
-		return nil
-	}
-	return strings.Fields(line[start : start+end])
-}
-
-func quotedValues(line string) []string {
-	var values []string
-	inQuote := false
-	escaped := false
-	var b strings.Builder
-	for _, r := range line {
-		switch {
-		case escaped:
-			b.WriteRune(r)
-			escaped = false
-		case r == '\\' && inQuote:
-			escaped = true
-		case r == '"':
-			if inQuote {
-				values = append(values, b.String())
-				b.Reset()
-			}
-			inQuote = !inQuote
-		case inQuote:
-			b.WriteRune(r)
-		}
-	}
-	return values
 }
 
 func decodeModifiedUTF7(s string) string {
@@ -729,20 +1085,14 @@ func decodeModifiedUTF7Segment(encoded string) (string, bool) {
 	return string(utf16.Decode(words)), true
 }
 
-func firstSubmatch(pattern, input, fallback string) string {
-	re := regexp.MustCompile(pattern)
-	m := re.FindStringSubmatch(input)
-	if len(m) < 2 {
-		return fallback
-	}
-	return m[1]
-}
-
 func splitAddressList(raw string) []string {
-	decoded := decodeHeaderValue(raw)
-	addrs, err := netmail.ParseAddressList(decoded)
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parser := netmail.AddressParser{WordDecoder: &mime.WordDecoder{CharsetReader: charset.NewReaderLabel}}
+	addrs, err := parser.ParseList(raw)
 	if err != nil {
-		return []string{decoded}
+		return []string{raw}
 	}
 	out := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
@@ -752,17 +1102,20 @@ func splitAddressList(raw string) []string {
 }
 
 func formatAddress(addr *netmail.Address) string {
+	address := (&netmail.Address{Address: addr.Address}).String()
 	if strings.TrimSpace(addr.Name) == "" {
-		return addr.Address
+		return strings.TrimSuffix(strings.TrimPrefix(address, "<"), ">")
 	}
-	return strings.TrimSpace(addr.Name) + " <" + addr.Address + ">"
+	// JSON summaries keep decoded names; quote the phrase without RFC 2047 encoding.
+	name := strings.NewReplacer("\r", " ", "\n", " ").Replace(addr.Name)
+	return quote(name) + " " + address
 }
 
 func decodeHeaderValue(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	decoded, err := new(mime.WordDecoder).DecodeHeader(raw)
+	decoded, err := (&mime.WordDecoder{CharsetReader: charset.NewReaderLabel}).DecodeHeader(raw)
 	if err != nil {
 		return raw
 	}
@@ -793,7 +1146,7 @@ func looksLikeIMAPCriteria(query string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(query))
 	keywords := []string{"ALL", "UNSEEN", "SEEN", "FLAGGED", "UNFLAGGED", "FROM ", "TO ", "SUBJECT ", "TEXT ", "SINCE ", "BEFORE ", "UID "}
 	for _, kw := range keywords {
-		if upper == strings.TrimSpace(kw) || strings.HasPrefix(upper, kw) {
+		if upper == strings.TrimSpace(kw) || strings.HasPrefix(upper, strings.TrimSpace(kw)+" ") {
 			return true
 		}
 	}
@@ -819,7 +1172,11 @@ func validateUID(id string) (string, error) {
 			return "", output.Validation("invalid_message_id", "message id must be a decimal IMAP UID", map[string]string{"id": id})
 		}
 	}
-	return id, nil
+	value, err := strconv.ParseUint(id, 10, 32)
+	if err != nil || value == 0 {
+		return "", output.Validation("invalid_message_id", "message id must be a nonzero 32-bit IMAP UID", nil)
+	}
+	return strconv.FormatUint(value, 10), nil
 }
 
 func ensureCRLF(msg []byte) []byte {
@@ -897,9 +1254,4 @@ func chooseDraftFolder(folders []Folder, requested string) string {
 		}
 	}
 	return "Drafts"
-}
-
-func redactIMAPError(s string) string {
-	re := regexp.MustCompile(`(?i)LOGIN\s+"[^"]+"\s+"[^"]+"`)
-	return re.ReplaceAllString(s, `LOGIN "****" "****"`)
 }

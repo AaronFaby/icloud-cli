@@ -38,7 +38,7 @@ Access 1914k tokens of past work via get_observations([IDs]) or mem-search skill
 
 # Agent Guidance
 
-This repo contains a Go CLI named `icloud` for noninteractive, JSON-first iCloud automation. The tool is optimized for agentic use, container portability, documented-protocol access, and a small auditable supply-chain surface; the current Go module intentionally has no third-party module dependencies.
+This repo contains a Go CLI named `icloud` for noninteractive, JSON-first iCloud automation. The tool is optimized for agentic use, container portability, documented-protocol access, and a small auditable supply-chain surface. Beyond the standard library, it uses Go's `golang.org/x/net` HTML parser and charset reader with `golang.org/x/text` for decoding; keep any further dependencies justified and auditable.
 
 The v1.0 surface covers:
 
@@ -59,7 +59,7 @@ Credential precedence is environment first, then config file:
 - `ICLOUD_APP_PASSWORD`
 - `ICLOUD_CONFIG`
 
-The config file can contain plaintext credentials only when the user explicitly runs `icloud auth save`.
+The config file can contain plaintext credentials only when the user explicitly runs `icloud auth save`. Prefer environment-only `auth save`; omitted credential flags use the existing environment variables. Keep environment secrets out of flag defaults and help output, and preserve atomic mode-0600 config replacement.
 
 Logging is environment-configured with safe defaults:
 
@@ -72,12 +72,22 @@ Use `icloud log status` to inspect the effective logging configuration. Logs sho
 
 CLI output is JSON by default, and `--json` is accepted on every command as a no-op for automation consistency. Nested `--help` should return a successful JSON help envelope and exit 0 without requiring credentials or network access.
 
+Reject unexpected positional arguments before any operation. Preserve failure exit codes when writing JSON fails. Log only redacted command arguments and operational error metadata.
+
 Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. `icloud mail messages get` is header-only by default; use `--body text`, `--body html`, `--attachments`, or `--raw` to fetch message content. `--body text` prefers useful plain text and falls back to HTML-derived text when the plain part is missing or only a tiny stub. Use `icloud mail messages attachment get --attachment <id>` to retrieve one attachment as `content_base64`. Reply, reply-all, and forward preserve text-threading headers for replies, use `Fwd:` subject handling for forwards, support `--dry-run` metadata previews, and support `--draft` Drafts append. Actual reply/reply-all/forward sends must continue to append a Sent copy. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
+
+Preserve the security boundaries documented in README.md: bounded IMAP/SMTP I/O, streaming MIME with one shared read budget, HTML limits before tree construction, explicit limit errors, and valid address/header serialization. `--since` uses calendar-day precision; Unicode plain-text search and `--from` are supported, while raw IMAP criteria must be ASCII. Do not retry a send solely because cleanup or Sent-copy append failed after SMTP acceptance.
+
+DAV creates must not overwrite existing resources. Structured updates preserve the stored UID and use its ETag when available; updates replace the complete resource. Deletes require positive individual-resource metadata of the expected service and a strong ETag, use conditional DELETE, and refuse redirects. Preserve legitimate opaque absolute resource hrefs while rejecting collections and unverifiable targets.
+
+Builds require Go 1.25 or newer; use a current patched Go release. Run tests, vet, and race checks for code changes. Keep the exact parser limits and user-visible compatibility notes in README.md synchronized with the implementation.
 
 When testing in this sandbox, keep Go's build cache inside the workspace:
 
 ```sh
 GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test ./...
+GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go vet ./...
+GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test -race ./...
 ```
 
 For local binaries:

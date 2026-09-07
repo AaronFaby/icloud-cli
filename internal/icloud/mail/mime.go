@@ -1,19 +1,57 @@
 package mail
 
 import (
-	"bytes"
 	"encoding/base64"
-	"html"
+	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
 	netmail "net/mail"
 	"net/textproto"
-	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/net/html/charset"
 )
+
+const (
+	maxMessageBytes  = 32 << 20
+	maxMIMEReadBytes = 128 << 20
+	maxMIMEDepth     = 16
+	maxMIMEParts     = 1000
+)
+
+// Shared across every layer: nested decoders consume the same work allowance.
+// A wrapper cannot reset the budget or cause another whole-message allocation.
+var errMIMEReadLimit = errors.New("MIME decoded read budget exceeded")
+
+type mimeBudget struct {
+	remaining int64
+	parts     int
+}
+
+type mimeBudgetReader struct {
+	reader io.Reader
+	budget *mimeBudget
+}
+
+func (r mimeBudgetReader) Read(p []byte) (int, error) {
+	if r.budget.remaining <= 0 {
+		return 0, errMIMEReadLimit
+	}
+	if int64(len(p)) > r.budget.remaining {
+		p = p[:r.budget.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.budget.remaining -= int64(n)
+	if r.budget.remaining < 0 {
+		return n, errMIMEReadLimit
+	}
+	return n, err
+}
 
 type messageContent struct {
 	Text        string
@@ -25,26 +63,39 @@ type parsedMIME struct {
 	textParts []string
 	htmlParts []string
 	files     []Attachment
+	contentID string
 }
 
-func extractReadableText(source Message) string {
+func extractReadableText(source Message) (string, error) {
 	if strings.TrimSpace(source.Raw) != "" {
-		if content, err := parseMessageContent(source.Raw); err == nil && strings.TrimSpace(content.Text) != "" {
-			return content.Text
+		content, err := parseMessageContent(source.Raw)
+		if err != nil {
+			return "", err
 		}
+		return content.Text, nil
 	}
-	return source.Body
+	return source.Body, nil
+}
+
+func parseMIME(raw, contentID string) (parsedMIME, error) {
+	parsed := parsedMIME{contentID: contentID}
+	if len(raw) > maxMessageBytes {
+		return parsed, fmt.Errorf("MIME message exceeds 32 MiB")
+	}
+	msg, err := netmail.ReadMessage(strings.NewReader(raw))
+	if err != nil {
+		return parsed, fmt.Errorf("invalid MIME message headers")
+	}
+	budget := &mimeBudget{remaining: maxMIMEReadBytes}
+	err = walkMIME(textproto.MIMEHeader(msg.Header), msg.Body, &parsed, budget, 0)
+	return parsed, err
 }
 
 func parseMessageContent(raw string) (messageContent, error) {
-	msg, err := netmail.ReadMessage(strings.NewReader(raw))
+	parsed, err := parseMIME(raw, "")
 	if err != nil {
 		return messageContent{}, err
 	}
-	body, _ := io.ReadAll(msg.Body)
-	parsed := parsedMIME{}
-	walkMIME(textproto.MIMEHeader(msg.Header), body, &parsed)
-
 	out := messageContent{Attachments: parsed.files}
 	for _, text := range parsed.textParts {
 		if strings.TrimSpace(text) != "" {
@@ -56,8 +107,11 @@ func parseMessageContent(raw string) (messageContent, error) {
 		if strings.TrimSpace(htmlPart) == "" {
 			continue
 		}
-		out.HTML = sanitizeHTML(htmlPart)
-		htmlText := htmlToText(htmlPart)
+		var htmlText string
+		out.HTML, htmlText, err = sanitizeHTML(htmlPart)
+		if err != nil {
+			return messageContent{}, err
+		}
 		if shouldUseHTMLText(out.Text, htmlText) {
 			out.Text = htmlText
 		}
@@ -78,173 +132,189 @@ func shouldUseHTMLText(plainText string, htmlText string) bool {
 	return (len(plainText) <= 40 || plainWords <= 5) && htmlWords >= 25 && len(htmlText) >= len(plainText)*4
 }
 
-func walkMIME(header textproto.MIMEHeader, body []byte, parsed *parsedMIME) {
-	mediaType, params, _ := mime.ParseMediaType(header.Get("Content-Type"))
-	disposition, dispParams, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+func walkMIME(header textproto.MIMEHeader, body io.Reader, parsed *parsedMIME, budget *mimeBudget, depth int) error {
+	if depth > maxMIMEDepth {
+		return fmt.Errorf("MIME nesting exceeds 16 levels")
+	}
+	budget.parts++
+	if budget.parts > maxMIMEParts {
+		return fmt.Errorf("MIME message exceeds 1000 parts")
+	}
+	mediaType, params, err := parseMIMEType(header.Get("Content-Type"))
+	if err != nil {
+		return err
+	}
+	disposition, dispParams, err := parseMIMEType(header.Get("Content-Disposition"))
+	if err != nil {
+		return err
+	}
 	filename := decodedFilename(dispParams["filename"])
 	if filename == "" {
 		filename = decodedFilename(params["name"])
 	}
-
-	lowerType := strings.ToLower(mediaType)
-	if lowerType == "" {
-		if filename != "" || strings.EqualFold(disposition, "attachment") {
-			lowerType = "application/octet-stream"
-		} else {
-			lowerType = "text/plain"
+	isFile := strings.EqualFold(disposition, "attachment") || filename != "" ||
+		(mediaType != "" && mediaType != "text/plain" && mediaType != "text/html" && !strings.HasPrefix(mediaType, "multipart/"))
+	if mediaType == "" {
+		mediaType = "text/plain"
+		if isFile {
+			mediaType = "application/octet-stream"
 		}
 	}
-
-	if strings.HasPrefix(lowerType, "multipart/") {
-		boundary := params["boundary"]
-		if boundary == "" {
-			return
+	decoded, err := decodeTransfer(body, header.Get("Content-Transfer-Encoding"))
+	if err != nil {
+		return err
+	}
+	decoded = mimeBudgetReader{reader: decoded, budget: budget}
+	if isFile {
+		id := strconv.Itoa(len(parsed.files) + 1)
+		var encoded strings.Builder
+		var sink io.Writer = io.Discard
+		var encoder io.WriteCloser
+		if parsed.contentID == id {
+			encoder = base64.NewEncoder(base64.StdEncoding, &encoded)
+			sink = encoder
 		}
-		reader := multipart.NewReader(bytes.NewReader(body), boundary)
+		size, err := io.Copy(sink, decoded)
+		if err != nil {
+			return mimeReadError(err)
+		}
+		if encoder != nil {
+			if err := encoder.Close(); err != nil {
+				return err
+			}
+		}
+		file := Attachment{
+			ID: id, Filename: filename, ContentType: mediaType, Size: int(size),
+			Inline:    strings.EqualFold(disposition, "inline") || (disposition == "" && header.Get("Content-ID") != ""),
+			ContentID: strings.Trim(header.Get("Content-ID"), "<>"),
+		}
+		if parsed.contentID == id {
+			file.ContentBase64 = encoded.String()
+		}
+		parsed.files = append(parsed.files, file)
+		return nil
+	}
+	if strings.HasPrefix(mediaType, "multipart/") {
+		if params["boundary"] == "" {
+			return fmt.Errorf("multipart MIME body is missing a boundary")
+		}
+		reader := multipart.NewReader(decoded, params["boundary"])
 		for {
 			part, err := reader.NextRawPart()
 			if err == io.EOF {
-				break
+				return nil
 			}
 			if err != nil {
-				break
+				return mimeReadError(err)
 			}
-			partBody, _ := io.ReadAll(part)
-			walkMIME(part.Header, partBody, parsed)
+			if err := walkMIME(part.Header, part, parsed, budget, depth+1); err != nil {
+				return err
+			}
 		}
-		return
 	}
+	if parsed.contentID == "" && (mediaType == "text/plain" || mediaType == "text/html") {
+		limit := 0
+		if mediaType == "text/html" {
+			limit = maxHTMLBytes
+		}
+		text, err := decodeText(decoded, params["charset"], budget, limit)
+		if err != nil {
+			return err
+		}
+		if mediaType == "text/plain" {
+			parsed.textParts = append(parsed.textParts, text)
+		} else {
+			parsed.htmlParts = append(parsed.htmlParts, text)
+		}
+		return nil
+	}
+	// Drain unselected text through its decoder so malformed transfers and the
+	// aggregate budget remain enforced during attachment-only extraction.
+	if _, err := io.Copy(io.Discard, decoded); err != nil {
+		return mimeReadError(err)
+	}
+	return nil
+}
 
-	decoded := decodeTransfer(body, header.Get("Content-Transfer-Encoding"))
-	isFile := strings.EqualFold(disposition, "attachment") || filename != ""
-	if isFile {
-		parsed.files = append(parsed.files, Attachment{
-			ID:          strconv.Itoa(len(parsed.files) + 1),
-			Filename:    filename,
-			ContentType: lowerType,
-			Size:        len(decoded),
-			Inline:      strings.EqualFold(disposition, "inline"),
-			ContentID:   strings.Trim(header.Get("Content-ID"), "<>"),
-		})
-		return
+func mimeReadError(err error) error {
+	if errors.Is(err, errMIMEReadLimit) {
+		return errMIMEReadLimit
 	}
+	// Transfer decoder errors can contain message bytes; expose no body content.
+	return fmt.Errorf("invalid MIME transfer encoding or multipart body")
+}
 
-	switch lowerType {
-	case "text/plain":
-		parsed.textParts = append(parsed.textParts, string(decoded))
-	case "text/html":
-		parsed.htmlParts = append(parsed.htmlParts, string(decoded))
+func parseMIMEType(value string) (string, map[string]string, error) {
+	if value == "" {
+		return "", nil, nil
 	}
+	mediaType, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid MIME content type or disposition")
+	}
+	return mediaType, params, nil
 }
 
 func decodedFilename(filename string) string {
-	filename = strings.TrimSpace(filename)
-	if filename == "" {
-		return ""
-	}
-	return decodeHeaderValue(filename)
+	return decodeHeaderValue(strings.TrimSpace(filename))
 }
 
-func decodeTransfer(body []byte, encoding string) []byte {
+func decodeTransfer(reader io.Reader, encoding string) (io.Reader, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "7bit", "8bit", "binary":
+		return reader, nil
 	case "quoted-printable":
-		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(body)))
-		if err == nil {
-			return decoded
-		}
+		return quotedprintable.NewReader(reader), nil
 	case "base64":
-		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(bytes.TrimSpace(body))))
-		if err == nil {
-			return decoded
-		}
+		return base64.NewDecoder(base64.StdEncoding, reader), nil
+	default:
+		return nil, fmt.Errorf("unsupported MIME transfer encoding")
 	}
-	return body
+}
+
+func decodeText(reader io.Reader, label string, budget *mimeBudget, limit int) (string, error) {
+	label = strings.ToLower(strings.TrimSpace(label))
+	switch label {
+	case "", "utf-8", "utf8", "us-ascii", "ascii":
+	default:
+		var err error
+		reader, err = charset.NewReaderLabel(label, reader)
+		if err != nil {
+			return "", fmt.Errorf("unsupported MIME charset")
+		}
+		reader = mimeBudgetReader{reader: reader, budget: budget}
+	}
+	if limit > 0 {
+		reader = io.LimitReader(reader, int64(limit)+1)
+	}
+	var text strings.Builder
+	if _, err := io.Copy(&text, reader); err != nil {
+		return "", mimeReadError(err)
+	}
+	if limit > 0 && text.Len() > limit {
+		return "", fmt.Errorf("HTML input exceeds 4 MiB")
+	}
+	decoded := text.String()
+	if !utf8.ValidString(decoded) {
+		return "", fmt.Errorf("invalid UTF-8 MIME text")
+	}
+	if (label == "us-ascii" || label == "ascii") && !isASCII(decoded) {
+		return "", fmt.Errorf("invalid ASCII MIME text")
+	}
+	return decoded, nil
 }
 
 func attachmentWithContent(raw string, id string) (Attachment, bool, error) {
-	msg, err := netmail.ReadMessage(strings.NewReader(raw))
+	parsed, err := parseMIME(raw, id)
 	if err != nil {
 		return Attachment{}, false, err
 	}
-	body, _ := io.ReadAll(msg.Body)
-	var found Attachment
-	var index int
-	ok := findAttachmentWithContent(textproto.MIMEHeader(msg.Header), body, id, &index, &found)
-	return found, ok, nil
-}
-
-func findAttachmentWithContent(header textproto.MIMEHeader, body []byte, id string, index *int, found *Attachment) bool {
-	mediaType, params, _ := mime.ParseMediaType(header.Get("Content-Type"))
-	disposition, dispParams, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
-	filename := decodedFilename(dispParams["filename"])
-	if filename == "" {
-		filename = decodedFilename(params["name"])
-	}
-	lowerType := strings.ToLower(mediaType)
-
-	if strings.HasPrefix(lowerType, "multipart/") {
-		boundary := params["boundary"]
-		if boundary == "" {
-			return false
-		}
-		reader := multipart.NewReader(bytes.NewReader(body), boundary)
-		for {
-			part, err := reader.NextRawPart()
-			if err == io.EOF {
-				return false
-			}
-			if err != nil {
-				return false
-			}
-			partBody, _ := io.ReadAll(part)
-			if findAttachmentWithContent(part.Header, partBody, id, index, found) {
-				return true
-			}
+	for _, file := range parsed.files {
+		if file.ID == id {
+			return file, true, nil
 		}
 	}
-
-	decoded := decodeTransfer(body, header.Get("Content-Transfer-Encoding"))
-	if lowerType == "" {
-		lowerType = "application/octet-stream"
-	}
-	if strings.EqualFold(disposition, "attachment") || filename != "" {
-		(*index)++
-		attachmentID := strconv.Itoa(*index)
-		if attachmentID == id {
-			*found = Attachment{
-				ID:            attachmentID,
-				Filename:      filename,
-				ContentType:   lowerType,
-				Size:          len(decoded),
-				Inline:        strings.EqualFold(disposition, "inline"),
-				ContentID:     strings.Trim(header.Get("Content-ID"), "<>"),
-				ContentBase64: base64.StdEncoding.EncodeToString(decoded),
-			}
-			return true
-		}
-	}
-	return false
-}
-
-func sanitizeHTML(input string) string {
-	out := regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`).ReplaceAllString(input, "")
-	out = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`).ReplaceAllString(out, "")
-	out = regexp.MustCompile(`(?is)\s+on[a-z0-9_-]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`).ReplaceAllString(out, "")
-	out = regexp.MustCompile(`(?is)\s+(href|src)\s*=\s*("[^"]*(javascript|data):[^"]*"|'[^']*(javascript|data):[^']*'|[^\s>]*(javascript|data):[^\s>]*)`).ReplaceAllString(out, "")
-	return strings.TrimSpace(out)
-}
-
-func htmlToText(input string) string {
-	out := regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`).ReplaceAllString(input, "")
-	out = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`).ReplaceAllString(out, "")
-	out = regexp.MustCompile(`(?i)<\s*(br|/p|/div|/li|/tr)\b[^>]*>`).ReplaceAllString(out, "\n")
-	out = regexp.MustCompile(`(?is)<[^>]+>`).ReplaceAllString(out, " ")
-	out = html.UnescapeString(out)
-	lines := strings.Split(out, "\n")
-	for i, line := range lines {
-		lines[i] = normalizeText(line)
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	return Attachment{}, false, nil
 }
 
 func normalizeText(text string) string {

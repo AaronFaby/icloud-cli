@@ -402,7 +402,7 @@ func TestParseMailSince(t *testing.T) {
 }
 
 func TestResolveCalendarName(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
 		switch r.URL.Path {
 		case "/.well-known/caldav":
@@ -435,11 +435,12 @@ func TestResolveCalendarName(t *testing.T) {
 	defer server.Close()
 
 	client := webdav.New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	href, err := resolveCalendarName(context.Background(), client, "work")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if href != "/calendars/work/" {
+	if href != server.URL+"/calendars/work/" {
 		t.Fatalf("href = %q", href)
 	}
 	if _, err := resolveCalendarName(context.Background(), client, "Aristotle"); err == nil {

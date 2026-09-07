@@ -13,7 +13,7 @@ import (
 
 func TestListCalendarsDiscoversCalendarHomeSet(t *testing.T) {
 	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		w.Header().Set("Content-Type", "application/xml")
 		switch r.URL.Path {
@@ -61,11 +61,12 @@ func TestListCalendarsDiscoversCalendarHomeSet(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	resources, err := client.ListCalendars(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resources) != 1 || resources[0].Href != "/calendars/work/" {
+	if len(resources) != 1 || resources[0].Href != server.URL+"/calendars/work/" {
 		t.Fatalf("unexpected resources: %#v", resources)
 	}
 	want := []string{"/.well-known/caldav", "/principal/", "/calendars/"}
@@ -81,7 +82,7 @@ func TestListCalendarsDiscoversCalendarHomeSet(t *testing.T) {
 
 func TestListAddressBooksFallsBackToBaseWhenPrincipalMissing(t *testing.T) {
 	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		w.Header().Set("Content-Type", "application/xml")
 		switch r.URL.Path {
@@ -113,11 +114,12 @@ func TestListAddressBooksFallsBackToBaseWhenPrincipalMissing(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	resources, err := client.ListAddressBooks(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resources) != 1 || resources[0].Href != "/card/" {
+	if len(resources) != 1 || resources[0].Href != server.URL+"/card/" {
 		t.Fatalf("unexpected resources: %#v", resources)
 	}
 	want := []string{"/.well-known/carddav", "/"}
@@ -133,7 +135,7 @@ func TestListAddressBooksFallsBackToBaseWhenPrincipalMissing(t *testing.T) {
 
 func TestListAddressBooksDiscoversAddressBookHomeSet(t *testing.T) {
 	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		w.Header().Set("Content-Type", "application/xml")
 		switch r.URL.Path {
@@ -181,11 +183,12 @@ func TestListAddressBooksDiscoversAddressBookHomeSet(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	resources, err := client.ListAddressBooks(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resources) != 1 || resources[0].Href != "/addressbooks/personal/" || resources[0].DisplayName != "Personal" {
+	if len(resources) != 1 || resources[0].Href != server.URL+"/addressbooks/personal/" || resources[0].DisplayName != "Personal" {
 		t.Fatalf("unexpected resources: %#v", resources)
 	}
 	want := []string{"/.well-known/carddav", "/principal/", "/addressbooks/"}
@@ -196,7 +199,7 @@ func TestListAddressBooksDiscoversAddressBookHomeSet(t *testing.T) {
 
 func TestListEventsSendsCalendarQueryReport(t *testing.T) {
 	var gotMethod, gotDepth, gotAuth, gotBody string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotDepth = r.Header.Get("Depth")
 		username, password, _ := r.BasicAuth()
@@ -223,6 +226,7 @@ func TestListEventsSendsCalendarQueryReport(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	resources, err := client.ListEvents(context.Background(), "/calendars/work/", "2026-06-09T10:00:00-07:00", "2026-06-09T11:30:00-07:00")
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +237,7 @@ func TestListEventsSendsCalendarQueryReport(t *testing.T) {
 	if !strings.Contains(gotBody, `<C:calendar-query`) || !strings.Contains(gotBody, `<C:time-range start="20260609T170000Z" end="20260609T183000Z"/>`) {
 		t.Fatalf("unexpected report body: %s", gotBody)
 	}
-	if len(resources) != 1 || resources[0].Href != "/calendars/work/event-1.ics" || resources[0].ETag != `"abc"` {
+	if len(resources) != 1 || resources[0].Href != server.URL+"/calendars/work/event-1.ics" || resources[0].ETag != `"abc"` {
 		t.Fatalf("unexpected resources: %#v", resources)
 	}
 	if !strings.Contains(resources[0].Data, "SUMMARY:Planning") {
@@ -243,7 +247,7 @@ func TestListEventsSendsCalendarQueryReport(t *testing.T) {
 
 func TestPutEventUsesHrefIDAndCalendarContentType(t *testing.T) {
 	var gotMethod, gotPath, gotType, gotBody string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotType = r.Header.Get("Content-Type")
@@ -255,8 +259,9 @@ func TestPutEventUsesHrefIDAndCalendarContentType(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	data := "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:event-1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
-	resource, err := client.PutEvent(context.Background(), "/calendars/work/", "/calendars/work/event-1.ics", data)
+	resource, err := client.PutEvent(context.Background(), "/calendars/work/", "/calendars/work/event-1.ics", data, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,14 +281,15 @@ func TestPutEventUsesHrefIDAndCalendarContentType(t *testing.T) {
 
 func TestPutEventDerivesIDFromUID(t *testing.T) {
 	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
-	_, err := client.PutEvent(context.Background(), "/calendars/work/", "", "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:planning-1\nEND:VEVENT\nEND:VCALENDAR\n")
+	client.HTTP = server.Client()
+	_, err := client.PutEvent(context.Background(), "/calendars/work/", "", "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:planning-1\nEND:VEVENT\nEND:VCALENDAR\n", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +300,12 @@ func TestPutEventDerivesIDFromUID(t *testing.T) {
 
 func TestDeleteEventAcceptsHrefAndResourceID(t *testing.T) {
 	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" {
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(deleteMetadata(r.URL.Path, "", "text/calendar", `"version"`)))
+			return
+		}
 		if r.Method != "DELETE" {
 			t.Fatalf("method = %q", r.Method)
 		}
@@ -304,6 +315,7 @@ func TestDeleteEventAcceptsHrefAndResourceID(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	if err := client.DeleteEvent(context.Background(), "/calendars/work/", "event-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -329,13 +341,14 @@ func TestCalendarQueryBodyEscapesFallbackTimeRange(t *testing.T) {
 
 func TestAuthorizeRejectsForeignAbsoluteURLs(t *testing.T) {
 	var sawRequest bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawRequest = true
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "secret-pass"})
+	client.HTTP = server.Client()
 	// Absolute URL to a non-allowlisted host must not receive Basic Auth or be fetched.
 	err := client.DeleteEvent(context.Background(), "/calendars/work/", "https://evil.example/steal.ics")
 	if err == nil {
@@ -408,7 +421,7 @@ func TestParseMultistatusReadsResourceTypesAndHomeSets(t *testing.T) {
 
 func TestListContactsSendsAddressBookQueryReport(t *testing.T) {
 	var gotMethod, gotDepth, gotAuth, gotBody string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotDepth = r.Header.Get("Depth")
 		username, password, _ := r.BasicAuth()
@@ -435,6 +448,7 @@ func TestListContactsSendsAddressBookQueryReport(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	resources, err := client.ListContacts(context.Background(), "/addressbooks/personal/")
 	if err != nil {
 		t.Fatal(err)
@@ -445,7 +459,7 @@ func TestListContactsSendsAddressBookQueryReport(t *testing.T) {
 	if !strings.Contains(gotBody, `<C:addressbook-query`) || !strings.Contains(gotBody, `<C:address-data/>`) {
 		t.Fatalf("unexpected report body: %s", gotBody)
 	}
-	if len(resources) != 1 || resources[0].Href != "/addressbooks/personal/contact-1.vcf" || resources[0].ETag != `"contact-etag"` {
+	if len(resources) != 1 || resources[0].Href != server.URL+"/addressbooks/personal/contact-1.vcf" || resources[0].ETag != `"contact-etag"` {
 		t.Fatalf("unexpected resources: %#v", resources)
 	}
 	if !strings.Contains(resources[0].Data, "FN:Ada Lovelace") {
@@ -455,7 +469,7 @@ func TestListContactsSendsAddressBookQueryReport(t *testing.T) {
 
 func TestGetContactUsesHrefAndReturnsVCard(t *testing.T) {
 	var gotMethod, gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		w.Header().Set("ETag", `"get-etag"`)
@@ -464,6 +478,7 @@ func TestGetContactUsesHrefAndReturnsVCard(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	resource, err := client.GetContact(context.Background(), "/addressbooks/personal/", "/addressbooks/personal/contact-1.vcf")
 	if err != nil {
 		t.Fatal(err)
@@ -478,7 +493,7 @@ func TestGetContactUsesHrefAndReturnsVCard(t *testing.T) {
 
 func TestPutContactUsesHrefIDAndVCardContentType(t *testing.T) {
 	var gotMethod, gotPath, gotType, gotBody string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotType = r.Header.Get("Content-Type")
@@ -490,8 +505,9 @@ func TestPutContactUsesHrefIDAndVCardContentType(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	data := "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:contact-1\r\nFN:Ada Lovelace\r\nEND:VCARD\r\n"
-	resource, err := client.PutContact(context.Background(), "/addressbooks/personal/", "/addressbooks/personal/contact-1.vcf", data)
+	resource, err := client.PutContact(context.Background(), "/addressbooks/personal/", "/addressbooks/personal/contact-1.vcf", data, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,14 +527,15 @@ func TestPutContactUsesHrefIDAndVCardContentType(t *testing.T) {
 
 func TestPutContactDerivesIDFromUID(t *testing.T) {
 	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
-	_, err := client.PutContact(context.Background(), "/addressbooks/personal/", "", "BEGIN:VCARD\nVERSION:3.0\nUID:ada-1\nFN:Ada Lovelace\nEND:VCARD\n")
+	client.HTTP = server.Client()
+	_, err := client.PutContact(context.Background(), "/addressbooks/personal/", "", "BEGIN:VCARD\nVERSION:3.0\nUID:ada-1\nFN:Ada Lovelace\nEND:VCARD\n", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +546,12 @@ func TestPutContactDerivesIDFromUID(t *testing.T) {
 
 func TestDeleteContactAcceptsHrefAndResourceID(t *testing.T) {
 	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" {
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(deleteMetadata(r.URL.Path, "", "text/vcard", `"version"`)))
+			return
+		}
 		if r.Method != "DELETE" {
 			t.Fatalf("method = %q", r.Method)
 		}
@@ -539,6 +561,7 @@ func TestDeleteContactAcceptsHrefAndResourceID(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL+"/", config.Config{AppleID: "user", AppPassword: "pass"})
+	client.HTTP = server.Client()
 	if err := client.DeleteContact(context.Background(), "/addressbooks/personal/", "contact-1"); err != nil {
 		t.Fatal(err)
 	}

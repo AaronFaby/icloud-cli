@@ -53,6 +53,11 @@ func Load(path string) (Config, SourceReport, error) {
 	cfg := Config{}
 	report := SourceReport{ConfigPath: path}
 
+	appleID := strings.TrimSpace(os.Getenv(EnvAppleID))
+	appPassword := strings.TrimSpace(os.Getenv(EnvAppPassword))
+	if appleID != "" && appPassword != "" {
+		return Config{AppleID: appleID, AppPassword: appPassword}, SourceReport{ConfigPath: path, AppleID: "env", AppPassword: "env"}, nil
+	}
 	if fileCfg, err := loadFile(path); err == nil {
 		cfg = fileCfg
 		report.AppleID = sourceName(fileCfg.AppleID, "config")
@@ -61,12 +66,12 @@ func Load(path string) (Config, SourceReport, error) {
 		return Config{}, report, output.Validation("invalid_config", "failed to read config file", err.Error())
 	}
 
-	if env := strings.TrimSpace(os.Getenv(EnvAppleID)); env != "" {
-		cfg.AppleID = env
+	if appleID != "" {
+		cfg.AppleID = appleID
 		report.AppleID = "env"
 	}
-	if env := strings.TrimSpace(os.Getenv(EnvAppPassword)); env != "" {
-		cfg.AppPassword = env
+	if appPassword != "" {
+		cfg.AppPassword = appPassword
 		report.AppPassword = "env"
 	}
 
@@ -91,7 +96,21 @@ func Save(opts SaveOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(opts.Path, append(b, '\n'), 0o600); err != nil {
+	// Replace the file atomically so existing permissions and interrupted writes
+	// cannot expose credentials or destroy the previous configuration.
+	f, err := os.CreateTemp(filepath.Dir(opts.Path), ".icloud-config-*")
+	if err != nil {
+		return "", output.Validation("config_write_failed", "failed to create private config file", err.Error())
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		_ = f.Close()
+		return "", output.Validation("config_write_failed", "failed to write config file", err.Error())
+	}
+	if err := f.Close(); err != nil {
+		return "", output.Validation("config_write_failed", "failed to close config file", err.Error())
+	}
+	if err := os.Rename(f.Name(), opts.Path); err != nil {
 		return "", output.Validation("config_write_failed", "failed to write config file", err.Error())
 	}
 	logging.Warn("credentials_saved_plaintext", "config_path", opts.Path)

@@ -43,7 +43,11 @@ func PrepareResponse(cfg config.Config, source Message, kind ResponseKind, input
 	}
 	body := strings.TrimRight(input.Text, "\r\n")
 	if includeOriginal {
-		body = body + "\n\n" + originalBlock(kind, source)
+		original, err := originalBlock(kind, source)
+		if err != nil {
+			return PreparedResponse{}, output.Remote("invalid_mime", "could not decode source message", err.Error())
+		}
+		body = body + "\n\n" + original
 	}
 	to, cc, err := responseRecipients(kind, source, input, from, cfg.AppleID)
 	if err != nil {
@@ -172,8 +176,12 @@ func buildReferences(existing, messageID string) string {
 	return existing + " " + messageID
 }
 
-func originalBlock(kind ResponseKind, source Message) string {
-	text := strings.TrimRight(extractReadableText(source), "\r\n")
+func originalBlock(kind ResponseKind, source Message) (string, error) {
+	text, err := extractReadableText(source)
+	if err != nil {
+		return "", err
+	}
+	text = strings.TrimRight(text, "\r\n")
 	switch kind {
 	case ResponseForward:
 		lines := []string{
@@ -187,10 +195,10 @@ func originalBlock(kind ResponseKind, source Message) string {
 			lines = append(lines, "Cc: "+strings.Join(source.CC, ", "))
 		}
 		lines = append(lines, "", quoteOriginal(text))
-		return strings.Join(lines, "\n")
+		return strings.Join(lines, "\n"), nil
 	default:
 		intro := "On " + source.Date + ", " + source.From + " wrote:"
-		return intro + "\n" + quoteOriginal(text)
+		return intro + "\n" + quoteOriginal(text), nil
 	}
 }
 

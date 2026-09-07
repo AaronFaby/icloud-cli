@@ -14,7 +14,7 @@ This CLI is designed for agentic and scripted iCloud automation, not as a genera
 - Keep commands noninteractive, JSON-first, and predictable for tool-calling loops.
 - Prefer environment-driven configuration so the binary works cleanly in containers, CI jobs, and ephemeral agent sandboxes.
 - Use documented protocols only unless the user explicitly approves private iCloud API work.
-- Keep the supply-chain surface small. The current Go module has no third-party module dependencies; adding one should have a clear payoff and be called out in review.
+- Keep the supply-chain surface small. The module uses Go's `golang.org/x/net` for HTML parsing and charset reading, with `golang.org/x/text` for decoding. Any further dependency needs a clear payoff and should be called out in review.
 - Keep stdout reserved for command JSON. Diagnostics and logs must go to stderr or the configured log file.
 - Mail fetches are header-only unless content is requested with `--raw`, `--body text|html`, or `--attachments`; `--body text` prefers useful plain text and falls back to HTML-derived text when the plain part is missing or only a tiny stub. Retrieve attachment bytes with `messages attachment get` and expect base64 JSON.
 
@@ -36,13 +36,13 @@ export ICLOUD_APP_PASSWORD="app-specific-password"
 export ICLOUD_CONFIG="/optional/path/config.json"
 ```
 
-Config-file storage is opt-in and plaintext:
+Config-file storage is opt-in and plaintext. With credentials already injected into the environment:
 
 ```sh
-icloud auth save --apple-id name@example.com --app-password app-specific-password
+icloud auth save
 ```
 
-Use `icloud auth check` to require credentials and `icloud auth doctor` for redacted diagnostics.
+Prefer secret-manager or CI environment injection; avoid literal secrets in shell history. `auth save` uses the credential environment variables when its corresponding flags are omitted. Explicit credential flags remain supported but can expose values through process arguments. Use `icloud auth check` to require credentials and `icloud auth doctor` for redacted diagnostics.
 
 ## Logging
 
@@ -67,10 +67,12 @@ Logs may include command lifecycle, timings, remote status codes, resource count
 
 ## Build And Test
 
-In this workspace, keep Go's build cache inside the repo:
+Use Go 1.25 or newer, preferably a current patched release. In this workspace, keep Go's build cache inside the repo:
 
 ```sh
 GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test ./...
+GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go vet ./...
+GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test -race ./...
 GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go build -o /private/tmp/icloud-cli ./cmd/icloud
 ```
 
@@ -94,6 +96,7 @@ ICLOUD_CONFIG=/private/tmp/icloud-cli-missing.json /private/tmp/icloud-cli auth 
 Expected exit codes:
 
 - `0`: success
+- `1`: unexpected error or failure writing JSON output
 - `2`: validation error
 - `3`: missing or invalid credentials
 - `4`: remote service or protocol error
@@ -124,13 +127,17 @@ icloud mail batch flag --input-json '{"folder":"INBOX","ids":["123","124"]}'
 Mail behavior notes:
 
 - Send uses SMTP and saves a copy to the detected Sent mailbox over IMAP.
+- Once SMTP accepts a message, cleanup or Sent-copy failure must not trigger a duplicate send; inspect `sent_copy.ok`. IMAP sessions are bounded to 30 seconds, SMTP sends and DAV operations to 45 seconds.
+- Outgoing encoded header lines over 998 bytes are rejected before sending or saving a draft.
 - Reply, reply-all, and forward are text-threading commands; replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, actual sends preserve Sent-copy behavior, `--dry-run` previews metadata without mutation, and `--draft` appends to Drafts without sending.
 - Reply, reply-all, and forward do not provide full MIME composition; do not imply HTML-aware quoting or attachment forwarding unless that feature is added later.
 - `messages get` is header-only unless `--raw`, `--body text|html`, or `--attachments` is passed; `--body text` may use HTML-derived text when the plain part is missing or only a tiny stub. `messages attachment get --attachment <id>` returns one attachment as `content_base64`.
 - Delete moves to the detected `\Trash` mailbox by default; permanent delete requires `--permanent`.
 - Message summary headers are decoded by default; `messages list --raw-headers` preserves raw subject/from/to/date fields.
+- `--since` has calendar-day precision. Unicode is supported in plain-text searches and `--from`; raw IMAP criteria must be ASCII.
 - `messages get` includes parsed IMAP flags when the server returns them.
 - `--json` is accepted on every command as a no-op because JSON output is already the default.
+- Nested group/command help is offline and returns exit 0. Unexpected positional arguments are validation errors; all command arguments must use named flags.
 
 Calendar:
 
@@ -138,7 +145,7 @@ Calendar:
 icloud calendar calendars list
 icloud calendar events list --calendar /calendar/href/ --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
 icloud calendar events list --calendar-name Aristotle --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
-icloud calendar events create --calendar /calendar/href/ --input-json '{"summary":"Planning","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
+icloud calendar events create --calendar /calendar/href/ --input-json '{"id":"event","summary":"Planning","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
 icloud calendar events update --calendar /calendar/href/ --id /calendar/href/event.ics --input-json '{"summary":"Planning updated","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
 icloud calendar events delete --calendar /calendar/href/ --id /calendar/href/event.ics
 ```
@@ -148,13 +155,19 @@ Contacts:
 ```sh
 icloud contacts books list
 icloud contacts contacts list --book /addressbook/href/
-icloud contacts contacts create --book /addressbook/href/ --input-json '{"formatted_name":"Ada Lovelace","emails":["ada@example.com"]}'
+icloud contacts contacts create --book /addressbook/href/ --input-json '{"id":"contact","formatted_name":"Ada Lovelace","emails":["ada@example.com"]}'
 icloud contacts contacts get --book /addressbook/href/ --id contact.vcf
 icloud contacts contacts update --book /addressbook/href/ --id /addressbook/href/contact.vcf --input-json '{"formatted_name":"Ada Lovelace","emails":["ada@example.com"]}'
 icloud contacts contacts delete --book /addressbook/href/ --id /addressbook/href/contact.vcf
 ```
 
 For Contacts, choose the `contacts books list` entry whose `resource_types` includes `addressbook`. Do not use collection roots as writable books.
+
+Calendar/contact creates reject an existing resource. Updates require a target ID and replace the complete resource; provide all fields to retain. Structured updates preserve the stored UID and use its ETag when available. Use raw `calendar_data` or `vcard` with the existing UID to retain properties outside the structured input, such as recurrence, alarms, or additional contact fields. DAV hrefs must use HTTPS.
+
+Deletes verify individual-resource metadata and require a strong ETag before issuing a conditional DELETE. Collection targets, wrong-service types, unverifiable metadata, and DELETE redirects are rejected. Mail parsing streams multipart bodies and enforces 32 MiB messages/literals, 16 MIME nesting levels, 1,000 MIME entities, and a shared 128 MiB decoded-read budget; oversized or overly complex input returns an error.
+
+HTML is checked before tree construction: decoded and sanitized HTML must fit 4 MiB, 50,000 tokens and attributes combined, and 1 MiB per token. Limit failures propagate to body extraction and reply preparation rather than returning an empty successful body.
 
 ## Safety Defaults
 

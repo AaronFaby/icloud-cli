@@ -154,7 +154,7 @@ func TestSanitizers(t *testing.T) {
 		"--input-json", `{"subject":"private","text":"secret"}`,
 		"--folder", "INBOX",
 	})
-	want := []string{"auth", "save", "--apple-id", "[redacted]", "--app-password=[redacted]", "--input-json", "[redacted]", "--folder", "INBOX"}
+	want := []string{"auth", "save", "--apple-id", "[redacted]", "--app-password=[redacted]", "--input-json", "[redacted]", "--folder", "[redacted]"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("args = %#v, want %#v", args, want)
 	}
@@ -167,7 +167,7 @@ func TestSanitizers(t *testing.T) {
 	if got := SanitizedSMTPCommand("AUTH PLAIN abc123"); got != "AUTH [redacted]" {
 		t.Fatalf("smtp sanitizer = %q", got)
 	}
-	if got := SanitizedURL("https://example.com/path?token=secret"); got != "https://example.com/path" {
+	if got := SanitizedURL("https://example.com/path?token=secret"); got != "https://example.com" {
 		t.Fatalf("url sanitizer = %q", got)
 	}
 	if got := SanitizedArgs([]string{"--header", "Authorization: Basic abc"}); got[1] != "[redacted]" {
@@ -179,5 +179,68 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{EnvLog, EnvLogLevel, EnvLogFile, EnvLogSize, EnvLogNum} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestLoggingOmitsContentAndCredentials(t *testing.T) {
+	var buf bytes.Buffer
+	Configure(Config{Destination: DestinationStderr, Level: "info"}, &buf)
+	defer Configure(Config{Destination: DestinationOff}, nil)
+	Info("command_start", "args", SanitizedArgs([]string{"mail", "messages", "search", "--query", `SUBJECT "private-marker"`, "--from=private-marker", "--calendar-name", "private-marker", "--help"}))
+	Warn("remote_failed", "error", "550 private-marker account rejected", "error_message", "private-marker", "status", 550)
+	Info("request", "url", SanitizedURL("https://user:private-marker@example.com/private-marker?secret=private-marker#private-marker"))
+	if strings.Contains(buf.String(), "private-marker") {
+		t.Fatalf("sensitive content leaked: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"status":550`) || !strings.Contains(buf.String(), "https://example.com") {
+		t.Fatalf("operational metadata missing: %s", buf.String())
+	}
+}
+
+func TestConfigureClosesPreviousFile(t *testing.T) {
+	Configure(Config{Destination: DestinationFile, FilePath: filepath.Join(t.TempDir(), "log"), SizeMB: 1}, nil)
+	old := ownedWriter.(*rotatingWriter)
+	Configure(Config{Destination: DestinationOff}, nil)
+	if _, err := old.Write([]byte("test")); err == nil {
+		t.Fatal("previous log file remains open after reconfiguration")
+	}
+}
+
+func TestRotationFailureIsReportedAndRecoverable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log")
+	w, err := newRotatingWriter(path, 4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Write([]byte("1234")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".1", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(path+".1", "keep")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := w.Write([]byte("5678")); err == nil || n != 0 {
+		t.Fatalf("rotation failure hidden: wrote %d bytes, err=%v", n, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "1234" || w.size != 4 {
+		t.Fatalf("active log changed on failed rotation: %q size=%d err=%v", data, w.size, err)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("5678")); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path + ".1")
+	if err != nil || string(data) != "1234" {
+		t.Fatalf("rotation did not recover: %q err=%v", data, err)
 	}
 }

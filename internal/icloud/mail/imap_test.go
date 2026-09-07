@@ -2,7 +2,14 @@ package mail
 
 import (
 	"bufio"
+	"context"
+	"errors"
+	"io"
+	netmail "net/mail"
+	"time"
+
 	"fmt"
+	"github.com/aaronfaby/icloud-cli/internal/output"
 	"net"
 	"strconv"
 	"strings"
@@ -154,10 +161,15 @@ func TestParseFetchDecodesMimeHeaders(t *testing.T) {
 	if msg.Subject != "日本語" || msg.RawSubject != "=?utf-8?B?5pel5pys6Kqe?=" {
 		t.Fatalf("subject = %q raw = %q", msg.Subject, msg.RawSubject)
 	}
-	if msg.From != "川上 <sender@example.com>" || msg.RawFrom == "" {
+	from, err := netmail.ParseAddress(msg.From)
+	if err != nil || from.Name != "川上" || from.Address != "sender@example.com" || !strings.Contains(msg.From, "川上") || msg.RawFrom == "" {
 		t.Fatalf("from = %q raw = %q", msg.From, msg.RawFrom)
 	}
-	if len(msg.To) != 1 || msg.To[0] != "受信者 <to@example.com>" || msg.RawTo == "" || msg.RawDate == "" {
+	if len(msg.To) != 1 {
+		t.Fatalf("to = %#v", msg.To)
+	}
+	to, err := netmail.ParseAddress(msg.To[0])
+	if err != nil || to.Name != "受信者" || to.Address != "to@example.com" || !strings.Contains(msg.To[0], "受信者") || msg.RawTo == "" || msg.RawDate == "" {
 		t.Fatalf("to/raw = %#v raw_to=%q raw_date=%q", msg.To, msg.RawTo, msg.RawDate)
 	}
 	if len(msg.CC) != 1 || msg.CC[0] != "cc@example.com" || len(msg.ReplyTo) != 1 || msg.ReplyTo[0] != "reply@example.com" || msg.References != "<root@example.com>" {
@@ -201,6 +213,8 @@ func TestLooksLikeIMAPCriteria(t *testing.T) {
 		`UID 123:456`:           true,
 		`SINCE 1-Jun-2026`:      true,
 		`not-an-imap-criterion`: false,
+		`Allison`:               false,
+		`seenbefore`:            false,
 		`TEXT "already quoted"`: true,
 	}
 	for query, want := range tests {
@@ -517,7 +531,7 @@ func TestPermanentDeleteRejectsMailboxExpungeFallback(t *testing.T) {
 }
 
 func TestValidateUIDRejectsInjection(t *testing.T) {
-	for _, id := range []string{"", "123 456", "123\r\nSTORE", "1;2", "abc", "1,2"} {
+	for _, id := range []string{"", "123 456", "123\r\nSTORE", "1;2", "abc", "1,2", "0", "4294967296"} {
 		if _, err := validateUID(id); err == nil {
 			t.Fatalf("validateUID(%q) expected error", id)
 		}
@@ -599,5 +613,288 @@ func assertCommands(t *testing.T, commands <-chan string, want []string) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestIMAPCommandRejectsLineInjection(t *testing.T) {
+	for _, value := range []string{"ALL\r\nB9 CREATE injected", "x\ny", "x\ry", "x\x00y"} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			client := &IMAPClient{}
+			if _, err := client.command("UID SEARCH %s", value); err == nil {
+				t.Fatal("accepted injection")
+			}
+			if _, err := client.commandLiteral("APPEND %s {0}", nil, quoteMailbox(value)); err == nil {
+				t.Fatal("accepted literal preamble injection")
+			}
+			if err := client.CreateFolder(value); err == nil {
+				t.Fatal("accepted folder injection")
+			}
+			if client.tag != 0 {
+				t.Fatal("invalid command reached transport")
+			}
+		})
+	}
+	for _, flag := range []string{"", `\Seen)`, `\Seen \Deleted`, "x\r\ny"} {
+		if err := (&IMAPClient{}).SetFlag("INBOX", "1", flag, true); err == nil {
+			t.Fatalf("accepted flag %q", flag)
+		}
+		if err := (&IMAPClient{}).AppendMessage("Drafts", []string{flag}, time.Time{}, nil); err == nil {
+			t.Fatalf("accepted append flag %q", flag)
+		}
+	}
+}
+
+func TestIMAPLoginCancellationAndClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := (&IMAPClient{}).Login(ctx, "dummy", "dummy"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled login = %v", err)
+	}
+	for _, mode := range []string{"cancel", "deadline", "close"} {
+		t.Run(mode, func(t *testing.T) {
+			server, conn := net.Pipe()
+			defer server.Close()
+			defer conn.Close()
+			client := &IMAPClient{conn: conn, r: bufio.NewReader(conn), w: bufio.NewWriter(conn)}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			if mode == "close" {
+				go func() { done <- client.Close() }()
+			} else {
+				go func() { done <- client.Login(ctx, "dummy", "dummy") }()
+				if mode == "cancel" {
+					cancel()
+				}
+			}
+			select {
+			case err := <-done:
+				if mode != "close" && err == nil {
+					t.Fatal("stalled login succeeded")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("IMAP operation hung")
+			}
+		})
+	}
+}
+
+func TestMailboxEncodingAcrossCommands(t *testing.T) {
+	for _, name := range []string{"INBOX", "A&B", "日本語", "Projects/日本語/📮"} {
+		if got := decodeModifiedUTF7(encodeModifiedUTF7(name)); got != name {
+			t.Fatalf("round trip %q = %q", name, got)
+		}
+	}
+	client, commands := newScriptedIMAPClient(t, []string{
+		"A0001 OK", "A0002 OK", "A0003 OK", "A0004 OK", "A0005 OK", "A0006 OK", "A0007 OK", "A0008 OK",
+	})
+	defer client.conn.Close()
+	for _, err := range []error{client.CreateFolder("日本語"), client.RenameFolder("日本語", "A&B"), client.DeleteFolder("日本語"), client.selectFolder("日本語"), client.Copy("日本語", "1", "A&B"), client.Move("日本語", "1", "A&B")} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertCommands(t, commands, []string{
+		`A0001 CREATE "&ZeVnLIqe-"`, `A0002 RENAME "&ZeVnLIqe-" "A&-B"`, `A0003 DELETE "&ZeVnLIqe-"`, `A0004 SELECT "&ZeVnLIqe-"`,
+		`A0005 SELECT "&ZeVnLIqe-"`, `A0006 UID COPY 1 "A&-B"`, `A0007 SELECT "&ZeVnLIqe-"`, `A0008 UID MOVE 1 "A&-B"`,
+	})
+}
+
+func TestListFoldersAcceptsAtomLiteralAndNilDelimiter(t *testing.T) {
+	client, _ := newScriptedIMAPClient(t, []string{
+		`* LIST (\HasNoChildren) "/" INBOX`, `* LIST () NIL flat`, `* LIST (\Sent) "/" {12}`, `&ZeVnLIqe- x`, "A0001 OK",
+	})
+	defer client.conn.Close()
+	folders, err := client.ListFolders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folders) != 3 || folders[0].Name != "INBOX" || folders[0].Delimiter != "/" || folders[1].Delimiter != "" || folders[1].Name != "flat" || folders[2].Name != "日本語 x" {
+		t.Fatalf("folders = %#v", folders)
+	}
+}
+
+func TestFetchSelectsRequestedUIDAndLiteral(t *testing.T) {
+	raw := "Subject: target\r\n\r\ntarget body\r\n"
+	other := "Subject: other\r\n\r\nother body\r\n"
+	client, _ := newScriptedIMAPClient(t, []string{
+		"A0001 OK",
+		fmt.Sprintf(`* 1 FETCH (BODY[] {%d}`, len(raw)), raw, ` UID 123 FLAGS (\Seen) RFC822.SIZE 44)`,
+		fmt.Sprintf(`* 2 FETCH (UID 456 FLAGS (\Flagged) BODY[] {%d}`, len(other)), other, ")",
+		`* 3 FETCH (UID 789 FLAGS (\Deleted))`, "A0002 OK",
+	})
+	defer client.conn.Close()
+	msg, err := client.FetchMessageWithOptions("INBOX", "123", FetchOptions{IncludeRaw: true, BodyMode: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.ID != "123" || msg.Raw != raw || msg.Subject != "target" || !strings.Contains(msg.Body, "target body") || msg.Size != 44 || len(msg.Flags) != 1 || msg.Flags[0] != `\Seen` {
+		t.Fatalf("message = %#v", msg)
+	}
+}
+
+func TestFetchMissingUIDReturnsNotFound(t *testing.T) {
+	for _, response := range [][]string{{"A0001 OK", "A0002 OK"}, {"A0001 OK", `* 2 FETCH (UID 456 FLAGS ())`, "A0002 OK"}, {"A0001 OK", `* 2 FETCH (UID 999 FLAGS (\Seen))`, "A0002 OK"}} {
+		client, _ := newScriptedIMAPClient(t, response)
+		_, err := client.FetchMessage("INBOX", "999", false)
+		client.conn.Close()
+		var remote *output.ExitError
+		if !errors.As(err, &remote) || remote.Err.Code != "message_not_found" {
+			t.Fatalf("missing fetch error = %v", err)
+		}
+	}
+}
+
+func TestAddressListsPreserveEncodedPunctuation(t *testing.T) {
+	for _, raw := range []string{`"Doe, Jane" <jane@example.com>`, `=?UTF-8?Q?Doe=2C_Jan=C3=A9?= <jane@example.com>`, `=?ISO-8859-1?Q?Doe=2C_Jan=E9?= <jane@example.com>`} {
+		var summary MessageSummary
+		applyHeaders(&summary, netmail.Header{"From": {raw}, "Reply-To": {raw}, "To": {raw}}, false)
+		for _, formatted := range []string{summary.From, summary.ReplyTo[0], summary.To[0]} {
+			address, err := netmail.ParseAddress(formatted)
+			if err != nil || address.Address != "jane@example.com" || !strings.Contains(address.Name, "Doe,") {
+				t.Fatalf("address %q = %#v, %v", formatted, address, err)
+			}
+		}
+	}
+}
+
+func TestAppendAcceptsUntaggedResponseBeforeContinuation(t *testing.T) {
+	server, conn := net.Pipe()
+	defer server.Close()
+	defer conn.Close()
+	client := &IMAPClient{conn: conn, r: bufio.NewReader(conn), w: bufio.NewWriter(conn)}
+	errCh := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		if !strings.Contains(line, `APPEND "&ZeVnLIqe-"`) {
+			errCh <- fmt.Errorf("wrong APPEND mailbox: %q", line)
+			return
+		}
+		_, err = io.WriteString(server, "* 2 EXISTS\r\n+ ready\r\n")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		n, _ := literalSize(strings.TrimSpace(line))
+		_, err = io.CopyN(io.Discard, reader, int64(n+2))
+		if err == nil {
+			_, err = io.WriteString(server, "A0001 OK appended\r\n")
+		}
+		errCh <- err
+	}()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if err := client.AppendMessage("日本語", nil, time.Time{}, []byte("Subject: x\r\n\r\nbody")); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIMAPRejectsStatusPrefixAndOmitsServerText(t *testing.T) {
+	for _, response := range []string{"A0001 NO echoed secret", "A0001 OKAY wrong status"} {
+		client, _ := newScriptedIMAPClient(t, []string{response})
+		_, err := client.command("NOOP")
+		client.conn.Close()
+		if err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("status error = %v", err)
+		}
+	}
+	if _, ok := literalSize("* 1 FETCH (BODY[] {-1}"); ok {
+		t.Fatal("accepted negative literal")
+	}
+}
+
+func TestAddressWithoutDisplayNamePreservesQuotedLocalPart(t *testing.T) {
+	addresses := splitAddressList(`"last,first"@example.com`)
+	if len(addresses) != 1 {
+		t.Fatalf("addresses = %#v", addresses)
+	}
+	parsed, err := netmail.ParseAddress(addresses[0])
+	if err != nil || parsed.Address != "last,first@example.com" {
+		t.Fatalf("address = %#v, %v", parsed, err)
+	}
+}
+
+func TestUTF8SearchUsesLiteralAndRejectsRawCriteria(t *testing.T) {
+	for _, query := range []string{`SUBJECT "日本語"`, "ALL\r\nB9 CREATE injected"} {
+		if _, err := (&IMAPClient{}).Search("INBOX", query); err == nil {
+			t.Fatalf("accepted invalid search %q", query)
+		}
+	}
+	for _, filter := range []bool{false, true} {
+		t.Run(fmt.Sprint(filter), func(t *testing.T) {
+			server, conn := net.Pipe()
+			defer server.Close()
+			defer conn.Close()
+			client := &IMAPClient{conn: conn, r: bufio.NewReader(conn), w: bufio.NewWriter(conn)}
+			_ = conn.SetDeadline(time.Now().Add(time.Second))
+			errCh := make(chan error, 1)
+			go func() {
+				reader := bufio.NewReader(server)
+				if _, err := reader.ReadString('\n'); err != nil {
+					errCh <- err
+					return
+				}
+				io.WriteString(server, "A0001 OK selected\r\n")
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					errCh <- err
+					return
+				}
+				key := "TEXT"
+				if filter {
+					key = "UNSEEN FROM"
+				}
+				if line != "A0002 UID SEARCH CHARSET UTF-8 "+key+" {9}\r\n" {
+					errCh <- fmt.Errorf("search command = %q", line)
+					return
+				}
+				io.WriteString(server, "+ continue\r\n")
+				literal := make([]byte, 11)
+				if _, err := io.ReadFull(reader, literal); err != nil {
+					errCh <- err
+					return
+				}
+				if string(literal) != "日本語\r\n" {
+					errCh <- fmt.Errorf("literal = %q", literal)
+					return
+				}
+				_, err = io.WriteString(server, "* search\r\nA0002 ok searched\r\n")
+				errCh <- err
+			}()
+			var err error
+			if filter {
+				_, err = client.ListMessagesWithOptions(MessageListOptions{Folder: "INBOX", From: "日本語", Unread: true})
+			} else {
+				_, err = client.Search("INBOX", "日本語")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := <-errCh; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestFetchAttributesIgnoreFlagKeywordsAndQuotedValues(t *testing.T) {
+	raw := "Subject: real target\r\n\r\n"
+	resp := imapResponse{Lines: []string{
+		`* 2 FETCH (FLAGS (UID 123 RFC822.SIZE 999 a[b) X-EXT "UID 123" UID 456 RFC822.SIZE 44 BODY[HEADER] {26}`,
+		")", "A0001 OK",
+	}, Literals: []string{raw}}
+	if _, found := requestedFetch(resp, "123"); found {
+		t.Fatal("selected UID keyword from FLAGS instead of UID attribute")
+	}
+	msg := parseFetch("INBOX", "456", resp, FetchOptions{})
+	if msg.ID != "456" || msg.Size != 44 || msg.Subject != "real target" || len(msg.Flags) != 5 {
+		t.Fatalf("message = %#v", msg)
 	}
 }

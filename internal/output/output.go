@@ -67,7 +67,9 @@ func Write(w io.Writer, env Envelope) error {
 }
 
 func Success(w io.Writer, service, operation string, data any, warnings ...string) int {
-	_ = Write(w, Envelope{OK: true, Service: service, Operation: operation, Data: data, Warnings: cleanWarnings(warnings)})
+	if err := Write(w, Envelope{OK: true, Service: service, Operation: operation, Data: data, Warnings: cleanWarnings(warnings)}); err != nil {
+		return ExitUnexpected
+	}
 	return ExitOK
 }
 
@@ -79,7 +81,9 @@ func Failure(w io.Writer, service, operation string, err error) int {
 		exitCode = e.ExitCode
 		outErr = e.Err
 	}
-	_ = Write(w, Envelope{OK: false, Service: service, Operation: operation, Error: &outErr})
+	if err := Write(w, Envelope{OK: false, Service: service, Operation: operation, Error: &outErr}); err != nil {
+		return ExitUnexpected
+	}
 	return exitCode
 }
 

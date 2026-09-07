@@ -26,7 +26,7 @@ func TestPrepareReplyUsesReplyToAndThreading(t *testing.T) {
 	if prepared.Subject != "Re: Hello" {
 		t.Fatalf("subject = %q", prepared.Subject)
 	}
-	if len(prepared.To) != 1 || prepared.To[0] != "Replies <reply@example.com>" {
+	if len(prepared.To) != 1 || prepared.To[0] != `"Replies" <reply@example.com>` {
 		t.Fatalf("to = %#v", prepared.To)
 	}
 	if prepared.Headers["In-Reply-To"] != "<source@example.com>" {
@@ -59,11 +59,11 @@ func TestPrepareReplyAllDeduplicatesAndExcludesSender(t *testing.T) {
 	if prepared.Subject != "Re: Hello" {
 		t.Fatalf("subject = %q", prepared.Subject)
 	}
-	wantTo := strings.Join([]string{"Sender <sender@example.com>", "Other <other@example.com>"}, "\n")
+	wantTo := strings.Join([]string{`"Sender" <sender@example.com>`, `"Other" <other@example.com>`}, "\n")
 	if strings.Join(prepared.To, "\n") != wantTo {
 		t.Fatalf("to = %#v", prepared.To)
 	}
-	wantCC := strings.Join([]string{"CC <cc@example.com>", "Extra <extra@example.com>"}, "\n")
+	wantCC := strings.Join([]string{`"CC" <cc@example.com>`, `"Extra" <extra@example.com>`}, "\n")
 	if strings.Join(prepared.CC, "\n") != wantCC {
 		t.Fatalf("cc = %#v", prepared.CC)
 	}
@@ -115,15 +115,15 @@ func TestPrepareResponseValidation(t *testing.T) {
 
 func TestExtractReadableTextDecodesTransferEncodingsAndMultipart(t *testing.T) {
 	qp := Message{Raw: "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nhello=20world\r\n"}
-	if got := extractReadableText(qp); !strings.Contains(got, "hello world") {
+	if got, err := extractReadableText(qp); err != nil || !strings.Contains(got, "hello world") {
 		t.Fatalf("quoted-printable text = %q", got)
 	}
 	b64 := Message{Raw: "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8gd29ybGQ=\r\n"}
-	if got := extractReadableText(b64); !strings.Contains(got, "hello world") {
+	if got, err := extractReadableText(b64); err != nil || !strings.Contains(got, "hello world") {
 		t.Fatalf("base64 text = %q", got)
 	}
 	multipart := Message{Raw: "Content-Type: multipart/alternative; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/html\r\n\r\n<p>html</p>\r\n--abc\r\nContent-Type: text/plain\r\n\r\nplain body\r\n--abc--\r\n"}
-	if got := extractReadableText(multipart); !strings.Contains(got, "plain body") {
+	if got, err := extractReadableText(multipart); err != nil || !strings.Contains(got, "plain body") {
 		t.Fatalf("multipart text = %q", got)
 	}
 }

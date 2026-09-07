@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
@@ -40,7 +42,11 @@ func Send(cfg config.Config, req SendRequest) (map[string]any, error) {
 	recipients = append(recipients, req.BCC...)
 	logging.Info("smtp_send_start", "host", DefaultSMTPHost, "to_count", len(req.To), "cc_count", len(req.CC), "bcc_count", len(req.BCC), "message_bytes", len(msg))
 	if err := sendMailTLS(DefaultSMTPHost, cfg.AppleID, cfg.AppPassword, req.From, recipients, msg); err != nil {
-		logging.Error("smtp_send_failed", "host", DefaultSMTPHost, "recipient_count", len(recipients), "error", err.Error())
+		logging.Error("smtp_send_failed", "host", DefaultSMTPHost, "recipient_count", len(recipients))
+		var typed *output.ExitError
+		if errors.As(err, &typed) {
+			return nil, err
+		}
 		return nil, output.Remote("smtp_send_failed", "failed to send iCloud mail", err.Error())
 	}
 	logging.Info("smtp_send_success", "host", DefaultSMTPHost, "recipient_count", len(recipients), "message_bytes", len(msg))
@@ -67,12 +73,12 @@ func appendSentCopy(cfg config.Config, msg []byte) map[string]any {
 
 	folders, err := client.ListFolders()
 	if err != nil {
-		logging.Warn("sent_copy_folder_list_failed", "error", err.Error())
+		logging.Warn("sent_copy_folder_list_failed")
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	folder := chooseSentFolder(folders, "")
 	if err := client.AppendMessage(folder, []string{`\Seen`}, time.Now(), msg); err != nil {
-		logging.Warn("sent_copy_append_failed", "folder", folder, "error", err.Error())
+		logging.Warn("sent_copy_append_failed", "folder", folder)
 		return map[string]any{"ok": false, "folder": folder, "error": err.Error()}
 	}
 	logging.Info("sent_copy_append_success", "folder", folder, "bytes", len(msg))
@@ -86,12 +92,12 @@ func AppendDraft(client *IMAPClient, req SendRequest) (map[string]any, error) {
 	}
 	folders, err := client.ListFolders()
 	if err != nil {
-		logging.Warn("draft_folder_list_failed", "error", err.Error())
+		logging.Warn("draft_folder_list_failed")
 		return nil, err
 	}
 	folder := chooseDraftFolder(folders, "")
 	if err := client.AppendMessage(folder, []string{`\Draft`}, time.Now(), msg); err != nil {
-		logging.Warn("draft_append_failed", "folder", folder, "error", err.Error())
+		logging.Warn("draft_append_failed", "folder", folder)
 		return nil, err
 	}
 	logging.Info("draft_append_success", "folder", folder, "bytes", len(msg))
@@ -99,18 +105,35 @@ func AppendDraft(client *IMAPClient, req SendRequest) (map[string]any, error) {
 }
 
 func sendMailTLS(addr string, username string, password string, from string, to []string, msg []byte) error {
+	return sendMailTLSContext(context.Background(), addr, username, password, from, to, msg)
+}
+
+func sendMailTLSContext(ctx context.Context, addr, username, password, from string, to []string, msg []byte) (resultErr error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	defer func() {
+		if resultErr != nil && ctx.Err() != nil {
+			resultErr = ctx.Err()
+		}
+	}()
 	start := time.Now()
 	logging.Info("smtp_connect_start", "host", addr)
-	conn, err := net.DialTimeout("tcp", addr, 20*time.Second)
+	conn, err := (&net.Dialer{Timeout: 20 * time.Second}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		logging.Error("smtp_connect_failed", "host", addr, "duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
+		logging.Error("smtp_connect_failed", "host", addr, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
 	defer conn.Close()
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	tc := textproto.NewConn(conn)
 	if _, _, err := tc.ReadResponse(220); err != nil {
-		logging.Error("smtp_greeting_failed", "host", addr, "error", err.Error())
+		logging.Error("smtp_greeting_failed", "host", addr)
 		return err
 	}
 	if err := smtpCommand(tc, 250, "EHLO localhost"); err != nil {
@@ -120,8 +143,8 @@ func sendMailTLS(addr string, username string, password string, from string, to 
 		return err
 	}
 	tlsConn := tls.Client(conn, &tls.Config{ServerName: "smtp.mail.me.com", MinVersion: tls.VersionTLS12})
-	if err := tlsConn.Handshake(); err != nil {
-		logging.Error("smtp_tls_failed", "host", addr, "error", err.Error())
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		logging.Error("smtp_tls_failed", "host", addr)
 		return err
 	}
 	logging.Info("smtp_tls_success", "host", addr)
@@ -130,8 +153,7 @@ func sendMailTLS(addr string, username string, password string, from string, to 
 	if err := smtpCommand(tc, 250, "EHLO localhost"); err != nil {
 		return err
 	}
-	plain := base64.StdEncoding.EncodeToString([]byte("\x00" + username + "\x00" + password))
-	if err := smtpCommand(tc, 235, "AUTH PLAIN "+plain); err != nil {
+	if err := smtpAuthenticate(tc, username, password); err != nil {
 		logging.Warn("smtp_auth_failed", "host", addr)
 		return err
 	}
@@ -144,11 +166,7 @@ func sendMailTLS(addr string, username string, password string, from string, to 
 		return err
 	}
 	for _, recipient := range to {
-		rcpt, err := envelopeAddress(recipient)
-		if err != nil {
-			return err
-		}
-		if err := smtpCommand(tc, 250, "RCPT TO:<"+rcpt+">"); err != nil {
+		if err := smtpRecipient(tc, recipient); err != nil {
 			return err
 		}
 	}
@@ -164,13 +182,46 @@ func sendMailTLS(addr string, username string, password string, from string, to 
 	if err := w.Close(); err != nil {
 		return err
 	}
-	_, _, err = tc.ReadResponse(250)
-	if err != nil {
-		logging.Error("smtp_data_failed", "message_bytes", len(msg), "error", err.Error())
+	if err := finishSMTPSend(tc, conn, deadline); err != nil {
+		logging.Error("smtp_data_failed", "message_bytes", len(msg))
 		return err
 	}
-	_ = smtpCommand(tc, 221, "QUIT")
 	logging.Info("smtp_send_completed", "host", addr, "duration_ms", time.Since(start).Milliseconds(), "recipient_count", len(to), "message_bytes", len(msg))
+	return nil
+}
+
+func smtpRecipient(tc *textproto.Conn, recipient string) error {
+	rcpt, err := envelopeAddress(recipient)
+	if err != nil {
+		return err
+	}
+	// Like net/smtp.Rcpt, accept 25x (including 251 forwarding success).
+	return smtpCommand(tc, 25, "RCPT TO:<"+rcpt+">")
+}
+
+func smtpAuthenticate(tc *textproto.Conn, username, password string) error {
+	plain := base64.StdEncoding.EncodeToString([]byte("\x00" + username + "\x00" + password))
+	err := smtpCommand(tc, 235, "AUTH PLAIN "+plain)
+	var reply *textproto.Error
+	if errors.As(err, &reply) {
+		// Authentication replies can echo credentials; expose only the status.
+		return output.Auth("smtp_auth_failed", "iCloud SMTP authentication failed", map[string]any{"status": reply.Code})
+	}
+	return err
+}
+
+func finishSMTPSend(tc *textproto.Conn, conn net.Conn, deadline time.Time) error {
+	if _, _, err := tc.ReadResponse(250); err != nil {
+		return err
+	}
+	// The server accepted DATA. Cleanup failure must not report a failed send:
+	// retrying at this point could send a duplicate message.
+	cleanupDeadline := time.Now().Add(2 * time.Second)
+	if deadline.Before(cleanupDeadline) {
+		cleanupDeadline = deadline
+	}
+	_ = conn.SetDeadline(cleanupDeadline)
+	_ = smtpCommand(tc, 221, "QUIT")
 	return nil
 }
 
@@ -183,7 +234,7 @@ func smtpCommand(c *textproto.Conn, expect int, line string) error {
 	defer c.EndResponse(id)
 	_, _, err = c.ReadResponse(expect)
 	if err != nil {
-		logging.Warn("smtp_command_failed", "command", smtpCommandName(line), "expect", expect, "error", err.Error())
+		logging.Warn("smtp_command_failed", "command", smtpCommandName(line), "expect", expect)
 	} else {
 		logging.Info("smtp_command_ok", "command", smtpCommandName(line), "expect", expect)
 	}
@@ -209,20 +260,53 @@ func smtpCommandName(line string) string {
 }
 
 func buildMessage(req SendRequest) ([]byte, error) {
+	from, err := addressHeader([]string{req.From})
+	if err != nil {
+		return nil, err
+	}
+	to, err := addressHeader(req.To)
+	if err != nil {
+		return nil, err
+	}
+	cc, err := addressHeader(req.CC)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := addressHeader(req.BCC); err != nil {
+		return nil, err
+	}
 	var b bytes.Buffer
 	headers := map[string]string{
-		"From":         req.From,
-		"To":           strings.Join(req.To, ", "),
+		"From":         from,
+		"To":           to,
 		"Subject":      req.Subject,
 		"Date":         time.Now().Format(time.RFC1123Z),
 		"MIME-Version": "1.0",
 	}
 	if len(req.CC) > 0 {
-		headers["Cc"] = strings.Join(req.CC, ", ")
+		headers["Cc"] = cc
 	}
 	for k, v := range req.Headers {
+		if !validHeaderName(k) {
+			return nil, output.Validation("invalid_header_name", "custom header name must contain printable ASCII except colon", nil)
+		}
 		if isProtectedHeader(k) {
 			continue
+		}
+		switch strings.ToLower(k) {
+		case "reply-to", "sender", "resent-from", "resent-to", "resent-cc", "resent-sender":
+			addrs, err := netmail.ParseAddressList(v)
+			if err != nil {
+				return nil, output.Validation("invalid_address_header", "invalid address header", nil)
+			}
+			values := make([]string, len(addrs))
+			for i, addr := range addrs {
+				values[i] = addr.String()
+			}
+			v, err = addressHeader(values)
+			if err != nil {
+				return nil, err
+			}
 		}
 		headers[k] = v
 	}
@@ -232,13 +316,21 @@ func buildMessage(req SendRequest) ([]byte, error) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(&b, "%s: %s\r\n", k, encodeHeader(headers[k]))
+		line := k + ": " + encodeHeader(headers[k])
+		if len(line) > 998 {
+			return nil, output.Validation("header_too_long", "encoded mail header exceeds the 998-octet line limit", nil)
+		}
+		b.WriteString(line + "\r\n")
 	}
 	if req.HTML != "" {
 		writer := multipart.NewWriter(&b)
 		fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", writer.Boundary())
-		writePart(writer, "text/plain; charset=utf-8", req.Text)
-		writePart(writer, "text/html; charset=utf-8", req.HTML)
+		if err := writePart(writer, "text/plain; charset=utf-8", req.Text); err != nil {
+			return nil, err
+		}
+		if err := writePart(writer, "text/html; charset=utf-8", req.HTML); err != nil {
+			return nil, err
+		}
 		if err := writer.Close(); err != nil {
 			return nil, err
 		}
@@ -256,17 +348,19 @@ func buildMessage(req SendRequest) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func writePart(writer *multipart.Writer, contentType string, body string) {
+func writePart(writer *multipart.Writer, contentType string, body string) error {
 	part, err := writer.CreatePart(map[string][]string{
 		"Content-Type":              {contentType},
 		"Content-Transfer-Encoding": {"quoted-printable"},
 	})
 	if err != nil {
-		return
+		return err
 	}
 	qp := quotedprintable.NewWriter(part)
-	_, _ = qp.Write([]byte(body))
-	_ = qp.Close()
+	if _, err := qp.Write([]byte(body)); err != nil {
+		return err
+	}
+	return qp.Close()
 }
 
 func encodeHeader(value string) string {
@@ -274,7 +368,7 @@ func encodeHeader(value string) string {
 	if value == "" || isASCII(value) {
 		return value
 	}
-	return "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(value)) + "?="
+	return mime.BEncoding.Encode("UTF-8", value)
 }
 
 // sanitizeHeaderValue strips CR/LF so agent- or user-supplied header values
@@ -292,25 +386,44 @@ func sanitizeHeaderValue(value string) string {
 // Display-name forms such as `Name <user@example.com>` are accepted for headers
 // but must not be placed inside angle brackets in the SMTP envelope.
 func envelopeAddress(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", fmt.Errorf("empty email address")
+	if strings.ContainsAny(raw, "\r\n\x00") {
+		return "", fmt.Errorf("invalid email address")
 	}
-	// Bare address without display name.
-	if !strings.ContainsAny(raw, "<>,\"") && strings.Count(raw, "@") == 1 {
-		if strings.ContainsAny(raw, " \t\r\n") {
-			return "", fmt.Errorf("invalid email address")
+	addr, err := netmail.ParseAddress(strings.TrimSpace(raw))
+	if err != nil || addr == nil || addr.Address == "" || !isASCII(addr.Address) {
+		return "", fmt.Errorf("invalid email address or unsupported non-ASCII mailbox")
+	}
+	addr.Name = ""
+	// Address.String preserves quoting of unusual local parts in the envelope.
+	return strings.TrimSuffix(strings.TrimPrefix(addr.String(), "<"), ">"), nil
+}
+
+func addressHeader(values []string) (string, error) {
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		if _, err := envelopeAddress(raw); err != nil {
+			return "", output.Validation("invalid_address", err.Error(), nil)
 		}
-		return raw, nil
+		addr, _ := netmail.ParseAddress(strings.TrimSpace(raw))
+		value := addr.String()
+		if addr.Name == "" {
+			value = strings.TrimSuffix(strings.TrimPrefix(value, "<"), ">")
+		}
+		out = append(out, value)
 	}
-	addr, err := netmail.ParseAddress(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid email address %q: %w", raw, err)
+	return strings.Join(out, ", "), nil
+}
+
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
 	}
-	if strings.TrimSpace(addr.Address) == "" {
-		return "", fmt.Errorf("empty email address")
+	for _, c := range name {
+		if c < 33 || c > 126 || c == ':' {
+			return false
+		}
 	}
-	return addr.Address, nil
+	return true
 }
 
 func isASCII(s string) bool {

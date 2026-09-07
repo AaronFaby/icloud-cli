@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -39,11 +39,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: stable
           cache: false
 
       - name: Test
-        run: go test ./...
+        run: |
+          go vet ./...
+          go test -race ./...
 
       - name: Build binary
         env:
@@ -77,6 +79,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: write
+      actions: read
 
     steps:
       - name: Check out repository
