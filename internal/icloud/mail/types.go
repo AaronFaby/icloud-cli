@@ -69,40 +69,57 @@ type MutationResult struct {
 	Warning string `json:"warning,omitempty"`
 }
 
+type SendAttachment struct {
+	Path          string `json:"path,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
+	Filename      string `json:"filename,omitempty"`
+	ContentType   string `json:"content_type,omitempty"`
+}
+
+type AttachmentPreview struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Size        int    `json:"size"`
+}
+
 type SendRequest struct {
-	From    string            `json:"from,omitempty"`
-	To      []string          `json:"to"`
-	CC      []string          `json:"cc,omitempty"`
-	BCC     []string          `json:"bcc,omitempty"`
-	Subject string            `json:"subject"`
-	Text    string            `json:"text,omitempty"`
-	HTML    string            `json:"html,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
+	Attachments []SendAttachment  `json:"attachments,omitempty"`
+	From        string            `json:"from,omitempty"`
+	To          []string          `json:"to"`
+	CC          []string          `json:"cc,omitempty"`
+	BCC         []string          `json:"bcc,omitempty"`
+	Subject     string            `json:"subject"`
+	Text        string            `json:"text,omitempty"`
+	HTML        string            `json:"html,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
 }
 
 type ResponseInput struct {
-	From            string   `json:"from,omitempty"`
-	To              []string `json:"to,omitempty"`
-	CC              []string `json:"cc,omitempty"`
-	BCC             []string `json:"bcc,omitempty"`
-	Subject         string   `json:"subject,omitempty"`
-	Text            string   `json:"text,omitempty"`
-	IncludeOriginal *bool    `json:"include_original,omitempty"`
+	Attachments        []SendAttachment `json:"attachments,omitempty"`
+	IncludeAttachments bool             `json:"include_attachments,omitempty"`
+	From               string           `json:"from,omitempty"`
+	To                 []string         `json:"to,omitempty"`
+	CC                 []string         `json:"cc,omitempty"`
+	BCC                []string         `json:"bcc,omitempty"`
+	Subject            string           `json:"subject,omitempty"`
+	Text               string           `json:"text,omitempty"`
+	IncludeOriginal    *bool            `json:"include_original,omitempty"`
 }
 
 type PreparedResponse struct {
-	Action           string            `json:"action"`
-	SourceFolder     string            `json:"source_folder"`
-	SourceID         string            `json:"source_id"`
-	From             string            `json:"from"`
-	To               []string          `json:"to,omitempty"`
-	CC               []string          `json:"cc,omitempty"`
-	BCC              []string          `json:"bcc,omitempty"`
-	Subject          string            `json:"subject"`
-	Headers          map[string]string `json:"headers,omitempty"`
-	IntendedSentCopy bool              `json:"intended_sent_copy"`
-	SourceFlag       string            `json:"source_flag,omitempty"`
-	Request          SendRequest       `json:"-"`
+	Attachments      []AttachmentPreview `json:"attachments,omitempty"`
+	Action           string              `json:"action"`
+	SourceFolder     string              `json:"source_folder"`
+	SourceID         string              `json:"source_id"`
+	From             string              `json:"from"`
+	To               []string            `json:"to,omitempty"`
+	CC               []string            `json:"cc,omitempty"`
+	BCC              []string            `json:"bcc,omitempty"`
+	Subject          string              `json:"subject"`
+	Headers          map[string]string   `json:"headers,omitempty"`
+	IntendedSentCopy bool                `json:"intended_sent_copy"`
+	SourceFlag       string              `json:"source_flag,omitempty"`
+	Request          SendRequest         `json:"-"`
 }
 
 type BatchRequest struct {

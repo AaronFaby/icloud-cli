@@ -170,7 +170,7 @@ func walkMIME(header textproto.MIMEHeader, body io.Reader, parsed *parsedMIME, b
 		var encoded strings.Builder
 		var sink io.Writer = io.Discard
 		var encoder io.WriteCloser
-		if parsed.contentID == id {
+		if parsed.contentID == id || parsed.contentID == "*" {
 			encoder = base64.NewEncoder(base64.StdEncoding, &encoded)
 			sink = encoder
 		}
@@ -188,7 +188,7 @@ func walkMIME(header textproto.MIMEHeader, body io.Reader, parsed *parsedMIME, b
 			Inline:    strings.EqualFold(disposition, "inline") || (disposition == "" && header.Get("Content-ID") != ""),
 			ContentID: strings.Trim(header.Get("Content-ID"), "<>"),
 		}
-		if parsed.contentID == id {
+		if parsed.contentID == id || parsed.contentID == "*" {
 			file.ContentBase64 = encoded.String()
 		}
 		parsed.files = append(parsed.files, file)

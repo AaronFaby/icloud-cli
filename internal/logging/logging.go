@@ -225,7 +225,7 @@ func SanitizedArgs(args []string) []string {
 		}
 		name, hasValue := splitFlag(arg)
 		if !strings.HasPrefix(name, "-") {
-			if !flagsStarted && strings.Contains(" auth check save doctor services list capabilities log status mail folders messages batch create rename delete get search send attachment reply reply-all forward move copy archive flag unflag mark-read mark-unread calendar calendars events contacts books help drive icloud-drive icloud_drive notes reminders photos ", " "+arg+" ") && !strings.ContainsAny(arg, " \t\r\n") {
+			if !flagsStarted && strings.Contains(" auth check save doctor services list capabilities log status mail folders messages batch create update patch poll rename delete get search send attachment reply reply-all forward move copy archive flag unflag mark-read mark-unread calendar calendars events contacts books help drive icloud-drive icloud_drive notes reminders photos ", " "+arg+" ") && !strings.ContainsAny(arg, " \t\r\n") {
 				out = append(out, arg)
 			} else {
 				out = append(out, "[redacted]")
@@ -234,7 +234,7 @@ func SanitizedArgs(args []string) []string {
 		}
 		flagsStarted = true
 		switch strings.TrimLeft(name, "-") {
-		case "help", "h", "json", "unread", "flagged", "raw-headers", "raw", "attachments", "permanent", "dry-run", "draft":
+		case "help", "h", "json", "unread", "flagged", "raw-headers", "raw", "attachments", "permanent", "dry-run", "draft", "start-now":
 			if hasValue {
 				out = append(out, name+"=[redacted]")
 			} else {
@@ -247,7 +247,7 @@ func SanitizedArgs(args []string) []string {
 				out = append(out, name)
 				redactNext = true
 			}
-		case "config", "apple-id", "app-password", "folder", "name", "limit", "since", "from", "id", "body", "attachment", "query", "to-folder", "trash-folder", "archive-folder", "calendar", "calendar-name", "to", "book":
+		case "config", "apple-id", "app-password", "folder", "name", "limit", "since", "from", "id", "body", "attachment", "query", "to-folder", "trash-folder", "archive-folder", "calendar", "calendar-name", "to", "book", "cursor", "email", "phone", "organization":
 			if hasValue {
 				out = append(out, name+"=[redacted]")
 			} else {

@@ -104,13 +104,15 @@ Expected exit codes:
 
 ## Common Operations
 
-Always pass JSON input via `--input-json`, `@file`, or stdin for create/update/send actions.
+Always pass JSON input via `--input-json`, `@file`, or stdin for create/update/patch/send actions.
 
 Mail:
 
 ```sh
 icloud mail folders list
 icloud mail messages list --folder INBOX --limit 10
+icloud mail messages poll --folder INBOX --start-now
+icloud mail messages poll --folder INBOX --cursor "$CURSOR" --limit 100
 icloud mail messages list --folder INBOX --unread --since 24h --from domain.com --flagged --limit 10
 icloud mail messages search --folder INBOX --query 'FROM "alerts@example.com"'
 icloud mail messages get --folder INBOX --id 123 --raw
@@ -130,7 +132,8 @@ Mail behavior notes:
 - Once SMTP accepts a message, cleanup or Sent-copy failure must not trigger a duplicate send; inspect `sent_copy.ok`. IMAP sessions are bounded to 30 seconds, SMTP sends and DAV operations to 45 seconds.
 - Outgoing encoded header lines over 998 bytes are rejected before sending or saving a draft.
 - Reply, reply-all, and forward are text-threading commands; replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, actual sends preserve Sent-copy behavior, `--dry-run` previews metadata without mutation, and `--draft` appends to Drafts without sending.
-- Reply, reply-all, and forward do not provide full MIME composition; do not imply HTML-aware quoting or attachment forwarding unless that feature is added later.
+- Send, reply, reply-all, and forward accept an `attachments` array: each entry uses `path` (regular file) or `content_base64`, plus optional `filename` and `content_type`. Forward alone accepts `include_attachments:true` to copy source files; default false. Previews expose filename/type/size, not paths or content. Quotes remain plain text. Limits: 100 attachments, 20 MiB decoded total, 32 MiB encoded message.
+- Poll returns `messages`, `next_cursor`, and `has_more`. Save the next cursor only after processing a successful page; retries may repeat messages. Default first poll includes existing mail; `--start-now` checkpoints after current mail and cannot combine with `--cursor`. Drain `has_more` pages, then reuse the completed cursor for future arrivals. Cursors bind to account/folder/UIDVALIDITY; `mailbox_reset` requires explicit restart. Poll does not mark read or report flag/deletion changes. Page limits: 1–1,000 messages (default100), 32 MiB fetched headers.
 - `messages get` is header-only unless `--raw`, `--body text|html`, or `--attachments` is passed; `--body text` may use HTML-derived text when the plain part is missing or only a tiny stub. `messages attachment get --attachment <id>` returns one attachment as `content_base64`.
 - Delete moves to the detected `\Trash` mailbox by default; permanent delete requires `--permanent`.
 - Message summary headers are decoded by default; `messages list --raw-headers` preserves raw subject/from/to/date fields.
@@ -147,6 +150,7 @@ icloud calendar events list --calendar /calendar/href/ --from 2026-06-08T00:00:0
 icloud calendar events list --calendar-name Aristotle --from 2026-06-08T00:00:00Z --to 2026-06-15T00:00:00Z
 icloud calendar events create --calendar /calendar/href/ --input-json '{"id":"event","summary":"Planning","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
 icloud calendar events update --calendar /calendar/href/ --id /calendar/href/event.ics --input-json '{"summary":"Planning updated","start":"2026-06-10T17:00:00Z","end":"2026-06-10T17:30:00Z"}'
+icloud calendar events patch --calendar /calendar/href/ --id /calendar/href/event.ics --input-json '{"summary":"Revised planning","location":null}'
 icloud calendar events delete --calendar /calendar/href/ --id /calendar/href/event.ics
 ```
 
@@ -155,15 +159,23 @@ Contacts:
 ```sh
 icloud contacts books list
 icloud contacts contacts list --book /addressbook/href/
+icloud contacts contacts search --book /addressbook/href/ --email example.com --limit 20
 icloud contacts contacts create --book /addressbook/href/ --input-json '{"id":"contact","formatted_name":"Ada Lovelace","emails":["ada@example.com"]}'
 icloud contacts contacts get --book /addressbook/href/ --id contact.vcf
 icloud contacts contacts update --book /addressbook/href/ --id /addressbook/href/contact.vcf --input-json '{"formatted_name":"Ada Lovelace","emails":["ada@example.com"]}'
+icloud contacts contacts patch --book /addressbook/href/ --id /addressbook/href/contact.vcf --input-json '{"organization":"Example"}'
 icloud contacts contacts delete --book /addressbook/href/ --id /addressbook/href/contact.vcf
 ```
 
 For Contacts, choose the `contacts books list` entry whose `resource_types` includes `addressbook`. Do not use collection roots as writable books.
 
 Calendar/contact creates reject an existing resource. Updates require a target ID and replace the complete resource; provide all fields to retain. Structured updates preserve the stored UID and use its ETag when available. Use raw `calendar_data` or `vcard` with the existing UID to retain properties outside the structured input, such as recurrence, alarms, or additional contact fields. DAV hrefs must use HTTPS.
+
+Prefer `patch` for selected fields: omitted properties stay unchanged, `null` clears optional values, unknown keys fail, and required names/times cannot be cleared. Patches require verified strong ETags and reject concurrent changes. Untargeted recurrence, alarms, and custom properties remain verbatim. Contact email/phone arrays replace all corresponding properties. A single event endpoint can change if the other stored endpoint is resolvable; changing `all_day` or `time_zone` requires both endpoints. Temporal patches of recurring events are rejected; metadata patches remain supported.
+
+Event creation accepts `all_day:true` with date-only `start`/exclusive `end`, or local wall times with `time_zone` such as `America/Los_Angeles`. Timed creates and changed patch endpoints serialize UTC; omitted endpoints remain verbatim. Embedded timezone data supports containers. DST gaps/folds require valid explicit-offset input; supplied offsets must agree with the named zone. All-day events cannot specify a timezone. Timed inputs require whole seconds and UTC years 1–9999.
+
+Contact search requires exactly one of `--query`, `--name`, `--email`, `--phone`, or `--organization`, using server-side case-insensitive substring matching. Results include normalized `contact` fields and the original vCard. Limit defaults to100, range1–1,000. DAV GET/XML responses are capped at32MiB.
 
 Deletes verify individual-resource metadata and require a strong ETag before issuing a conditional DELETE. Collection targets, wrong-service types, unverifiable metadata, and DELETE redirects are rejected. Mail parsing streams multipart bodies and enforces 32 MiB messages/literals, 16 MIME nesting levels, 1,000 MIME entities, and a shared 128 MiB decoded-read budget; oversized or overly complex input returns an error.
 

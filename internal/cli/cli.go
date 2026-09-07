@@ -34,6 +34,8 @@ type eventInput struct {
 	Start        string `json:"start,omitempty"`
 	End          string `json:"end,omitempty"`
 	CalendarData string `json:"calendar_data,omitempty"`
+	AllDay       bool   `json:"all_day,omitempty"`
+	TimeZone     string `json:"time_zone,omitempty"`
 }
 
 type contactInput struct {
@@ -118,7 +120,7 @@ func groupHelp(args []string) map[string]any {
 	case "mail folders":
 		commands = "list create rename delete"
 	case "mail messages":
-		commands = "list get attachment search send reply reply-all forward move copy delete archive flag unflag mark-read mark-unread"
+		commands = "list poll get attachment search send reply reply-all forward move copy delete archive flag unflag mark-read mark-unread"
 	case "mail messages attachment":
 		commands = "get"
 	case "mail batch":
@@ -128,11 +130,11 @@ func groupHelp(args []string) map[string]any {
 	case "calendar calendars", "contacts books":
 		commands = "list"
 	case "calendar events":
-		commands = "list create update delete"
+		commands = "list create update patch delete"
 	case "contacts":
 		commands = "books contacts"
 	case "contacts contacts":
-		commands = "list get create update delete"
+		commands = "list search get create update patch delete"
 	default:
 		return nil
 	}
@@ -314,6 +316,34 @@ func (a app) mailFolders(args []string) (any, error) {
 
 func (a app) mailMessages(args []string) (any, error) {
 	switch args[0] {
+	case "poll":
+		fs := newFlagSet("mail messages poll")
+		configPath := fs.String("config", "", "config path")
+		folder := fs.String("folder", "INBOX", "folder")
+		cursor := fs.String("cursor", "", "opaque cursor from previous poll; omitted starts from existing mail")
+		limit := fs.Int("limit", 100, "page limit, 1 to 1000")
+		startNow := fs.Bool("start-now", false, "start after current mail; cannot combine with cursor")
+		rawHeaders := fs.Bool("raw-headers", false, "include raw header fields")
+		if help, err := parseFlags(fs, args[1:]); help != nil || err != nil {
+			return help, err
+		}
+		if *limit < 1 || *limit > 1000 {
+			return nil, output.Validation("invalid_limit", "poll limit must be between 1 and 1000", nil)
+		}
+		if *startNow && *cursor != "" {
+			return nil, output.Validation("invalid_cursor", "start-now cannot be combined with cursor", nil)
+		}
+		cfg, _, err := config.RequireCredentials(*configPath)
+		if err != nil {
+			return nil, err
+		}
+		client, err := a.imapClient(*configPath)
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		return client.PollMessages(cfg.AppleID, mail.PollOptions{Folder: *folder, Cursor: *cursor, Limit: *limit, StartNow: *startNow, RawHeaders: *rawHeaders})
+
 	case "list":
 		fs := newFlagSet("mail messages list")
 		configPath := fs.String("config", "", "config path")
@@ -668,6 +698,8 @@ func (a app) calendar(args []string) (any, error) {
 
 func (a app) calendarEvents(args []string) (any, error) {
 	switch args[0] {
+	case "patch":
+		return a.patchDAV(args[1:], true)
 	case "list":
 		fs := newFlagSet("calendar events list")
 		configPath := fs.String("config", "", "config path")
@@ -796,6 +828,10 @@ func (a app) contacts(args []string) (any, error) {
 
 func (a app) contactResources(args []string) (any, error) {
 	switch args[0] {
+	case "patch":
+		return a.patchDAV(args[1:], false)
+	case "search":
+		return a.searchContacts(args[1:])
 	case "list":
 		fs := newFlagSet("contacts contacts list")
 		configPath := fs.String("config", "", "config path")
@@ -965,7 +1001,7 @@ func classify(args []string) (string, string) {
 			break
 		}
 		switch arg {
-		case "check", "save", "doctor", "list", "capabilities", "status", "folders", "messages", "batch", "calendars", "events", "books", "contacts", "attachment", "get", "create", "update", "delete", "rename", "search", "send", "reply", "reply-all", "forward", "move", "copy", "archive", "flag", "unflag", "mark-read", "mark-unread":
+		case "check", "save", "doctor", "list", "capabilities", "status", "folders", "messages", "batch", "calendars", "events", "books", "contacts", "attachment", "get", "create", "update", "patch", "poll", "delete", "rename", "search", "send", "reply", "reply-all", "forward", "move", "copy", "archive", "flag", "unflag", "mark-read", "mark-unread":
 			parts = append(parts, arg)
 		default:
 			return service, "unknown"
@@ -1003,7 +1039,7 @@ func normalizeArgs(args []string) []string {
 		out = append(out, arg)
 		if strings.HasPrefix(arg, "-") && !hasValue {
 			switch name {
-			case "h", "help", "unread", "flagged", "raw-headers", "raw", "attachments", "dry-run", "draft", "permanent":
+			case "h", "help", "unread", "flagged", "raw-headers", "raw", "attachments", "dry-run", "draft", "permanent", "start-now":
 			default:
 				valueNext = true
 			}
@@ -1119,7 +1155,7 @@ func buildCalendarData(input eventInput) (string, error) {
 	if strings.TrimSpace(input.Start) == "" || strings.TrimSpace(input.End) == "" {
 		return "", output.Validation("missing_event_time", "event start and end are required when calendar_data is not provided", nil)
 	}
-	start, end, err := webdav.CalendarRange(input.Start, input.End)
+	times, err := webdav.EventTimes(input.Start, input.End, input.AllDay, input.TimeZone)
 	if err != nil {
 		return "", err
 	}
@@ -1130,8 +1166,8 @@ func buildCalendarData(input eventInput) (string, error) {
 		"BEGIN:VEVENT",
 		"UID:" + escapeICal(uid),
 		"DTSTAMP:" + time.Now().UTC().Format("20060102T150405Z"),
-		"DTSTART:" + start,
-		"DTEND:" + end,
+		times[0],
+		times[1],
 		"SUMMARY:" + escapeICal(input.Summary),
 	}
 	if strings.TrimSpace(input.Description) != "" {

@@ -82,6 +82,15 @@ DAV creates must not overwrite existing resources. Structured updates preserve t
 
 Builds require Go 1.25 or newer; use a current patched Go release. Run tests, vet, and race checks for code changes. Keep the exact parser limits and user-visible compatibility notes in README.md synchronized with the implementation.
 
+New automation features in the working tree:
+
+- Send/reply/reply-all/forward accept `attachments` entries with `path` or `content_base64`, optional `filename`/`content_type`. Forward source files only when `include_attachments:true`. Keep preview output to metadata. Limits: 100 files, 20 MiB decoded attachments, 32 MiB encoded message.
+- `mail messages poll` returns `messages`, `next_cursor`, and `has_more`. First poll includes existing mail unless `--start-now` is supplied. Save cursors only after processing a successful page; errors must not advance them. Bind cursors to account, folder, and UIDVALIDITY; detect mailbox resets. Poll does not mark messages read.
+- Calendar/contact `patch` preserves omitted properties and uses verified strong ETags. Optional JSON `null` clears a field; unknown keys and clearing required fields fail. Existing `update` remains full replacement. Preserve recurrence/alarms/custom fields; reject temporal patches of recurring events.
+- Events support `all_day` with date-only start/exclusive end, or local wall times with IANA `time_zone`. Embed timezone data and reject ambiguous/nonexistent local times unless an explicit valid offset resolves them. Mode/zone patches require both endpoints.
+- Contact `search` supports exactly one query/name/email/phone/organization filter and returns normalized contact fields. Use CardDAV filtering, with limit 1–1,000 (default 100).
+- DAV response bodies are capped at 32 MiB; content parsing allows at most 100,000 physical lines and 32 component levels. Preserve folded properties without quadratic copying.
+
 When testing in this sandbox, keep Go's build cache inside the workspace:
 
 ```sh

@@ -15,9 +15,9 @@ This project exists to give agents, scripts, and containerized jobs a narrow, in
 
 V1 supports:
 
-- Mail over IMAP/SMTP, including message triage filters, decoded headers, selective text/HTML body extraction, attachment metadata and base64 retrieval, send with Sent-copy append, reply/reply-all/forward, Drafts append, flags, read state, and move/copy/delete/archive mutations.
-- Calendar discovery and event CRUD over CalDAV, including calendar lookup by display name.
-- Contacts address-book discovery and contact CRUD over CardDAV.
+- Mail over IMAP/SMTP, including cursor-based polling, triage filters, decoded headers, selective body extraction, attachment retrieval and sending, reply/reply-all/forward, Drafts append, Sent-copy append, and message mutations.
+- Calendar discovery and event CRUD over CalDAV, including partial edits, all-day events, explicit timezones, and calendar lookup by display name.
+- Contacts address-book discovery, search, CRUD, and partial edits over CardDAV.
 - Capability reporting for unsupported iCloud services such as Drive, Notes, Reminders, and Photos.
 
 Missing credentials, validation errors, unsupported services, and remote failures all return structured JSON plus stable exit codes.
@@ -26,7 +26,7 @@ Missing credentials, validation errors, unsupported services, and remote failure
 
 The current release is `v1.0.7`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. Earlier functionality has been smoke-tested against iCloud using disposable records.
 
-This README describes the working tree, including unreleased security changes: environment-based `auth save`, guarded DAV deletion, bounded MIME/HTML parsing, and the Go 1.25 minimum. These changes have passed local tests and security review; they have not yet had live iCloud validation or been included in a published release. Installations from the release page or Homebrew do not yet include them.
+This README describes the working tree, including unreleased attachments, polling, partial edits, timezone/all-day events, contact search, and security changes. These changes have local test coverage but have not yet had live iCloud validation or been included in a published release. Installations from the release page or Homebrew do not yet include them.
 
 Release builds are produced for:
 
@@ -152,13 +152,36 @@ icloud mail messages send --input-json '{
 }'
 ```
 
+Attach local regular files or base64 data with an `attachments` array:
+
+```sh
+icloud mail messages send --input-json '{
+  "to": ["person@example.com"], "subject": "Report", "text": "Attached.",
+  "attachments": [{"path":"/tmp/report.pdf","content_type":"application/pdf"}]
+}'
+icloud mail messages forward --folder INBOX --id 123 --dry-run --input-json '{
+  "to":["person@example.com"], "text":"FYI", "include_attachments":true
+}'
+```
+
+Each attachment accepts `path` or `content_base64`, with optional `filename` and `content_type` (default `application/octet-stream`). Reply, reply-all, and forward also accept new attachments. Only forward accepts `include_attachments` to copy source attachments; it defaults to false. Dry-run previews include filename, content type, and size, without file paths or base64 content. Limits are 100 attachments, 20 MiB total decoded attachment bytes, and 32 MiB for the complete encoded message.
+
 Successful sends are accepted by SMTP and then copied to the detected Sent mailbox over IMAP. If SMTP succeeds but saving the sent copy fails, the command reports `sent_copy.ok=false` instead of retrying the send.
 
 Outgoing headers exceeding the 998-byte encoded line limit return a validation error before sending or saving a draft. Shorten the field or recipient list when this occurs.
 
 IMAP sessions have a 30-second deadline; SMTP sends and DAV operations have 45-second deadlines. Saving a Sent copy uses a separate IMAP session. Once SMTP accepts the message, a cleanup failure does not turn the send into a failure that could trigger a duplicate retry.
 
-Reply, reply-all, and forward compose text-threaded messages from a source message. Replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, and actual sends use the same Sent-copy behavior as `messages send`. Pass `--dry-run` to preview recipients, subject, headers, and intended flags without sending or saving; pass `--draft` to append the composed message to Drafts instead of sending. This surface does not preserve attachments or render HTML quotes.
+Reply, reply-all, and forward compose text-threaded messages from a source message. Replies preserve `In-Reply-To` and `References`, forwards use `Fwd:` subject handling, and actual sends use the same Sent-copy behavior as `messages send`. Pass `--dry-run` to preview recipients, subject, headers, attachments, and intended flags without sending or saving; pass `--draft` to append the composed message to Drafts instead of sending. Quotes remain plain text.
+
+Poll for newly added messages using a reusable cursor:
+
+```sh
+icloud mail messages poll --folder INBOX --start-now
+icloud mail messages poll --folder INBOX --cursor "$CURSOR" --limit 100
+```
+
+Read `data.messages`, `data.next_cursor`, and `data.has_more` from the JSON envelope. Save the next cursor only after successfully processing the page; retrying an earlier cursor can repeat messages. Without a cursor, polling includes existing mail; `--start-now` instead returns a checkpoint after current mail and cannot be combined with a cursor. Follow `has_more` to finish the current snapshot, then reuse the completed cursor to check for later arrivals. Polling returns ascending UIDs and does not mark messages read. Cursors belong to one account and folder; a `mailbox_reset` error requires explicitly restarting. This detects new messages, not changes to flags or deletions. Limits are 1–1,000 messages per page (default 100) and 32 MiB of fetched headers per page.
 
 Move a message:
 
@@ -228,6 +251,26 @@ Creates generate random IDs when omitted and reject an existing resource instead
 
 Calendar listing accepts either or both time bounds; omit a bound for an open-ended range. Times must be valid RFC3339 values or compact UTC values such as `20260610T170000Z`. Credentialed DAV requests require HTTPS, including redirects.
 
+Create an all-day event with date-only values and an exclusive end date, or provide local wall times with an IANA timezone:
+
+```sh
+icloud calendar events create --calendar /123/calendars/work/ --input-json '{"summary":"Away","all_day":true,"start":"2026-09-10","end":"2026-09-12"}'
+icloud calendar events create --calendar /123/calendars/work/ --input-json '{"summary":"Planning","start":"2026-09-10T09:00","end":"2026-09-10T09:30","time_zone":"America/Los_Angeles"}'
+```
+
+All-day events cannot specify `time_zone`. Timed events are stored as UTC instants; timezone data is embedded for containers. Nonexistent or ambiguous local times during daylight-saving transitions are rejected; use RFC3339 times with an explicit valid offset to disambiguate. When also supplying `time_zone`, the offset must agree with that zone. Timed inputs require whole-second precision and years 1–9999 after UTC conversion.
+
+Use `patch` to change selected fields while retaining other stored properties:
+
+```sh
+icloud calendar events patch --calendar /123/calendars/work/ --id planning-example --input-json '{"summary":"Revised planning","location":null}'
+icloud contacts contacts patch --book /123/carddavhome/card/ --id ada-example --input-json '{"organization":"Example","note":null}'
+```
+
+Omitted fields remain unchanged; `null` clears optional fields, while required names and event times cannot be cleared. Unknown patch keys are errors. Contact patches support `formatted_name`, `given_name`, `family_name`, `emails`, `phones`, `organization`, and `note`; arrays replace the corresponding email or phone properties. Event patches support `summary`, `description`, `location`, `start`, `end`, `all_day`, and `time_zone`. Patches preserve the stored UID and untargeted properties, including alarms and recurrence components, and require a verified strong ETag. A concurrent change fails instead of overwriting it. Existing `update` commands still replace the full resource.
+
+A single event endpoint can be patched when the other stored endpoint can be resolved. Changed timed endpoints serialize UTC; omitted endpoints remain verbatim. Changing `all_day` or `time_zone` requires both `start` and `end`. Metadata patches support recurring events; temporal patches of recurring events are rejected to avoid changing recurrence semantics. Recurrence-aware time editing and new recurrence creation are outside this structured feature set. DAV GET and XML response bodies are limited to 32 MiB; content parsing allows 100,000 physical lines and 32 component levels.
+
 Event/contact deletion first verifies that the target is an individual resource of the expected service, then deletes it conditionally using its strong ETag. Collections, missing or ambiguous metadata, and weak or missing ETags are rejected. Delete requests do not follow redirects; legitimate absolute resource hrefs and opaque resource names remain supported.
 
 Contacts CRUD:
@@ -247,6 +290,15 @@ icloud contacts contacts delete --book /123/carddavhome/card/ --id ada-example
 ```
 
 Use the address book entry from `contacts books list` whose `resource_types` includes `addressbook`; iCloud may also return collection roots that are not writable address books. Contact IDs may be bare IDs, `.vcf` names, hrefs returned by `contacts list`, or full resource URLs.
+
+Search contacts on the server:
+
+```sh
+icloud contacts contacts search --book /123/carddavhome/card/ --query Ada --limit 20
+icloud contacts contacts search --book /123/carddavhome/card/ --email example.com
+```
+
+Specify exactly one of `--query`, `--name`, `--email`, `--phone`, or `--organization`. Matching is case-insensitive substring matching; `--query` searches across all these fields. Results include href, ETag, raw vCard, and normalized `contact` fields. The limit defaults to 100 and accepts 1–1,000 results.
 
 ## Testing
 

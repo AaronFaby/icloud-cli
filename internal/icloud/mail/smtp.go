@@ -260,6 +260,14 @@ func smtpCommandName(line string) string {
 }
 
 func buildMessage(req SendRequest) ([]byte, error) {
+	if len(req.Text)+len(req.HTML) > maxMessageBytes {
+		return nil, output.Validation("message_limit", "message body exceeds 32 MiB", nil)
+	}
+	attachments, _, err := resolveAttachments(req.Attachments)
+	if err != nil {
+		return nil, err
+	}
+
 	from, err := addressHeader([]string{req.From})
 	if err != nil {
 		return nil, err
@@ -322,6 +330,52 @@ func buildMessage(req SendRequest) ([]byte, error) {
 		}
 		b.WriteString(line + "\r\n")
 	}
+	if len(attachments) > 0 {
+		writer := multipart.NewWriter(&b)
+		fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", writer.Boundary())
+		if req.HTML != "" {
+			var body bytes.Buffer
+			alt := multipart.NewWriter(&body)
+			if err := writePart(alt, "text/plain; charset=utf-8", req.Text); err != nil {
+				return nil, err
+			}
+			if err := writePart(alt, "text/html; charset=utf-8", req.HTML); err != nil {
+				return nil, err
+			}
+			if err := alt.Close(); err != nil {
+				return nil, err
+			}
+			part, err := writer.CreatePart(textproto.MIMEHeader{"Content-Type": {mime.FormatMediaType("multipart/alternative", map[string]string{"boundary": alt.Boundary()})}})
+			if err != nil {
+				return nil, err
+			}
+			part.Write(body.Bytes())
+		} else if err := writePart(writer, "text/plain; charset=utf-8", req.Text); err != nil {
+			return nil, err
+		}
+		for _, a := range attachments {
+			part, err := writer.CreatePart(textproto.MIMEHeader{"Content-Type": {a.ContentType}, "Content-Disposition": {mime.FormatMediaType("attachment", map[string]string{"filename": a.Filename})}, "Content-Transfer-Encoding": {"base64"}})
+			if err != nil {
+				return nil, err
+			}
+			encoded := a.ContentBase64
+			for len(encoded) > 0 {
+				n := 76
+				if len(encoded) < n {
+					n = len(encoded)
+				}
+				fmt.Fprint(part, encoded[:n], "\r\n")
+				encoded = encoded[n:]
+			}
+		}
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
+		if b.Len() > maxMessageBytes {
+			return nil, output.Validation("message_limit", "encoded message exceeds 32 MiB", nil)
+		}
+		return b.Bytes(), nil
+	}
 	if req.HTML != "" {
 		writer := multipart.NewWriter(&b)
 		fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", writer.Boundary())
@@ -334,6 +388,9 @@ func buildMessage(req SendRequest) ([]byte, error) {
 		if err := writer.Close(); err != nil {
 			return nil, err
 		}
+		if b.Len() > maxMessageBytes {
+			return nil, output.Validation("message_limit", "encoded message exceeds 32 MiB", nil)
+		}
 		return b.Bytes(), nil
 	}
 	fmt.Fprintf(&b, "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n")
@@ -344,6 +401,9 @@ func buildMessage(req SendRequest) ([]byte, error) {
 	}
 	if err := qp.Close(); err != nil {
 		return nil, err
+	}
+	if b.Len() > maxMessageBytes {
+		return nil, output.Validation("message_limit", "encoded message exceeds 32 MiB", nil)
 	}
 	return b.Bytes(), nil
 }
@@ -437,7 +497,7 @@ func isASCII(s string) bool {
 
 func isProtectedHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "from", "to", "cc", "bcc", "subject", "date", "mime-version", "content-type", "content-transfer-encoding":
+	case "from", "to", "cc", "bcc", "subject", "date", "mime-version", "content-type", "content-transfer-encoding", "resent-bcc":
 		return true
 	default:
 		return false

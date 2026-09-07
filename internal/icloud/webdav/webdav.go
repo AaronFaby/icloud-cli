@@ -25,11 +25,12 @@ const (
 )
 
 type Resource struct {
-	Href          string   `json:"href"`
-	DisplayName   string   `json:"display_name,omitempty"`
-	ResourceTypes []string `json:"resource_types,omitempty"`
-	ETag          string   `json:"etag,omitempty"`
-	Data          string   `json:"data,omitempty"`
+	Href          string         `json:"href"`
+	DisplayName   string         `json:"display_name,omitempty"`
+	ResourceTypes []string       `json:"resource_types,omitempty"`
+	ETag          string         `json:"etag,omitempty"`
+	Data          string         `json:"data,omitempty"`
+	Contact       *ContactFields `json:"contact,omitempty"`
 	propHrefs     map[string]string
 }
 
@@ -229,7 +230,7 @@ func (c *Client) xmlRequest(ctx context.Context, method string, requestURL strin
 		logging.Error("webdav_request_failed", "method", method, "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return nil, output.Remote("webdav_request_failed", "iCloud WebDAV request failed", map[string]any{"status": resp.StatusCode, "body": string(b)})
 	}
-	b, err := io.ReadAll(resp.Body)
+	b, err := readDAVBody(resp.Body)
 	if err != nil {
 		logging.Error("webdav_response_read_failed", "method", method, "url", logging.SanitizedURL(requestURL), "error", err.Error())
 		return nil, err
@@ -281,7 +282,7 @@ func (c *Client) get(ctx context.Context, requestURL string) (Resource, error) {
 		logging.Error("webdav_get_failed", "url", logging.SanitizedURL(requestURL), "status", resp.StatusCode)
 		return Resource{}, output.Remote("webdav_get_failed", "iCloud WebDAV GET failed", map[string]any{"status": resp.StatusCode})
 	}
-	b, err := io.ReadAll(resp.Body)
+	b, err := readDAVBody(resp.Body)
 	if err != nil {
 		logging.Error("webdav_get_read_failed", "url", logging.SanitizedURL(requestURL), "error", err.Error())
 		return Resource{}, err
@@ -793,4 +794,18 @@ func firstLineValue(data, prefix, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// maxDAVBody bounds both XML query responses and individual resource bodies.
+const maxDAVBody = 32 << 20
+
+func readDAVBody(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxDAVBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxDAVBody {
+		return nil, output.Remote("webdav_response_too_large", "WebDAV response exceeds 32 MiB", nil)
+	}
+	return data, nil
 }

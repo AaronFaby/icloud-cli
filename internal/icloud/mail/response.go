@@ -62,6 +62,30 @@ func PrepareResponse(cfg config.Config, source Message, kind ResponseKind, input
 		Text:    body,
 		Headers: headers,
 	}
+	req.Attachments = append([]SendAttachment{}, input.Attachments...)
+	if input.IncludeAttachments {
+		if kind != ResponseForward {
+			return PreparedResponse{}, output.Validation("invalid_attachment_option", "include_attachments is only supported for forward", nil)
+		}
+		if source.Raw == "" {
+			return PreparedResponse{}, output.Validation("missing_source_raw", "forward attachments requires the raw source message", nil)
+		}
+		parsed, err := parseMIME(source.Raw, "*")
+		if err != nil {
+			return PreparedResponse{}, output.Remote("invalid_mime", "could not decode source attachments", err.Error())
+		}
+		for _, a := range parsed.files {
+			req.Attachments = append(req.Attachments, SendAttachment{Filename: a.Filename, ContentType: a.ContentType, ContentBase64: a.ContentBase64})
+		}
+	}
+	attachments, previews, err := resolveAttachments(req.Attachments)
+	if err != nil {
+		return PreparedResponse{}, err
+	}
+	req.Attachments = attachments
+	if _, err := buildMessage(req); err != nil {
+		return PreparedResponse{}, err
+	}
 	sourceFlag := ""
 	switch kind {
 	case ResponseReply, ResponseReplyAll:
@@ -70,6 +94,7 @@ func PrepareResponse(cfg config.Config, source Message, kind ResponseKind, input
 		sourceFlag = `$Forwarded`
 	}
 	return PreparedResponse{
+		Attachments:      previews,
 		Action:           action,
 		SourceFolder:     source.Folder,
 		SourceID:         source.ID,
