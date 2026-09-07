@@ -24,9 +24,9 @@ Missing credentials, validation errors, unsupported services, and remote failure
 
 ## Status
 
-The current release is `v1.0.7`. The v1.0 series covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. Earlier functionality has been smoke-tested against iCloud using disposable records.
+The current release is `v1.1.0`. It covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. Earlier functionality has been smoke-tested against iCloud using disposable records.
 
-This README describes the working tree, including unreleased attachments, polling, partial edits, timezone/all-day events, contact search, and security changes. These changes have local test coverage but have not yet had live iCloud validation or been included in a published release. Installations from the release page or Homebrew do not yet include them.
+Version 1.1.0 adds attachments, polling, partial edits, timezone/all-day events, contact search, and security hardening. These changes have automated test coverage and code/security review but have not yet had live iCloud validation. Download the tagged release assets for this version; Homebrew availability follows the separate tap update.
 
 Release builds are produced for:
 
