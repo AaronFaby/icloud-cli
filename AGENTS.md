@@ -1,114 +1,59 @@
-<claude-mem-context>
-# Memory Context
-
-# [icloud-cli] recent context, 2026-06-24 7:12am PDT
-
-Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
-Format: ID TIME TYPE TITLE
-Fetch details: get_observations([IDs]) | Search: mem-search skill
-
-Stats: 17 obs (5,687t read) | 1,913,935t work | 100% savings
-
-### Jun 8, 2026
-548 4:05p ⚖️ iCloud Go CLI Tool: Project Concept Defined for Agentic AI Use
-### Jun 12, 2026
-555 5:04p 🟣 iCloud CLI v1.0.1 Released to GitHub
-556 " ✅ GitHub Actions Workflow Opted Into Node.js 24
-### Jun 13, 2026
-557 8:24a ⚖️ iCloud CLI: Logging System Design — Environment-Variable-Driven with File Rotation
-### Jun 14, 2026
-558 8:03a ⚖️ iCloud CLI: 5 Planned Improvements Scoped for Next Release
-### Jun 15, 2026
-559 7:08a ✅ iCloud CLI: MIT License Added to Project
-560 " ✅ iCloud CLI: MIT License Added and Pushed to GitHub
-561 " ⚖️ iCloud CLI Homebrew Distribution: Personal Tap + Source Formula
-562 " 🔵 iCloud CLI v1.0.3 Tarball: SHA256 and Root Directory Confirmed for Homebrew Formula
-### Jun 16, 2026
-566 1:11p ⚖️ iCloud CLI Homebrew Tap: Architecture Decisions Finalized
-567 " 🟣 iCloud CLI v1.0.4 Released: MIT License Included in Tagged Source
-568 " 🟣 AaronFaby/homebrew-tap Repository Created with icloud Formula and Automation
-569 " 🟣 bump-icloud.yml: Automated Formula Bump Workflow with PR Creation
-570 " 🟣 icloud-cli Release Workflow Now Dispatches Homebrew Tap Bump Automatically
-571 " ✅ README, SKILL.md, AGENTS.md Updated with Homebrew Install Instructions
-572 " 🔵 Homebrew brew audit Quirks and Node.js Warning in Tap CI
-573 " 🔵 Homebrew tap test-bot CI: brew test-bot --only-formulae Skipped on Push (PR-only)
-
-Access 1914k tokens of past work via get_observations([IDs]) or mem-search skill.
-</claude-mem-context>
-
 # Agent Guidance
 
-This repo contains a Go CLI named `icloud` for noninteractive, JSON-first iCloud automation. The tool is optimized for agentic use, container portability, documented-protocol access, and a small auditable supply-chain surface. Beyond the standard library, it uses Go's `golang.org/x/net` HTML parser and charset reader with `golang.org/x/text` for decoding; keep any further dependencies justified and auditable.
+## Scope and references
 
-The v1.0 surface covers:
+`icloud` is a noninteractive, JSON-first Go CLI for iCloud automation. Keep it portable, predictable for agents and scripts, and small enough to audit.
 
-- Mail over IMAP/SMTP, including folder/message listing, search/get, selective text/HTML body extraction, attachment metadata and base64 retrieval, send with Sent-copy append, text-threaded reply/reply-all/forward, Drafts append, move/copy/delete/archive, flags, read state, and batch mutations.
-- Calendar discovery and event CRUD over CalDAV.
-- Contacts address-book discovery and contact CRUD over CardDAV.
-- Capability reporting for unsupported services.
+- Use documented protocols: IMAP/SMTP for Mail, CalDAV for Calendar, and CardDAV for Contacts. Private iCloud APIs, web-session scraping, and Drive/Notes/Reminders/Photos support require an explicit user decision.
+- Reuse the standard library and existing helpers. The module also uses `golang.org/x/net` for HTML parsing/charset support and `golang.org/x/text` for decoding; justify further dependencies.
+- Use [README.md](README.md) for command examples, exact resource limits, and compatibility notes. Keep it synchronized with behavior, along with [skill/icloud-cli/SKILL.md](skill/icloud-cli/SKILL.md).
 
-Use documented protocols only unless the user explicitly approves private iCloud API work:
+## CLI, credentials, and logging
 
-- Mail: IMAP/SMTP.
-- Calendar: CalDAV.
-- Contacts: CardDAV.
+- Preserve JSON output and stable exit codes. `--json` is a no-op; nested `--help` must return a successful JSON envelope without credentials or network access. Reject unexpected positional arguments before operations. Failure to write JSON must return a nonzero exit code.
+- Credential values come from `ICLOUD_APPLE_ID` and `ICLOUD_APP_PASSWORD` first, then the config file. `ICLOUD_CONFIG` selects the default config path; an explicit `--config` overrides it.
+- Write plaintext credentials only when the user explicitly runs `icloud auth save`. Prefer environment-supplied credentials, keep them out of flag defaults/help, and preserve atomic mode-0600 config replacement.
+- Logs contain operational metadata only. Redact command arguments and error text; never log credentials, auth headers/payloads, Apple IDs, message bodies or subjects, raw RFC822, vCards, iCalendar payloads, event summaries, or contact names. Attachment previews must omit paths and content.
+- Logging is environment-configured: `ICLOUD_CLI_LOG=file|stderr|off` (default `file`), `ICLOUD_CLI_LOG_LEVEL=info|warn|error` (default `warn`), `ICLOUD_CLI_LOG_FILE` (default OS cache path `icloud-cli/icloud.log`), `ICLOUD_CLI_LOG_SIZE` (default 10 MB), and `ICLOUD_CLI_LOG_NUM` (default 3). Use `icloud log status` to inspect effective settings.
 
-Credential precedence is environment first, then config file:
+## Mail contracts
 
-- `ICLOUD_APPLE_ID`
-- `ICLOUD_APP_PASSWORD`
-- `ICLOUD_CONFIG`
+- Message summaries decode headers by default; `--raw-headers` preserves raw fields. Message retrieval is header-only unless `--body text|html`, `--attachments`, or `--raw` is requested. Text extraction prefers useful plain text and falls back to HTML-derived text when plain text is absent or a tiny stub. Attachment retrieval returns `content_base64`.
+- Preserve triage filters (`--unread`, `--since`, `--from`, `--flagged`, `--limit`). `--since` has IMAP calendar-day precision. Plain-text search and `--from` support Unicode; raw IMAP criteria must be ASCII.
+- Replies preserve threading headers; forwards use `Fwd:` subjects. Preserve metadata-only `--dry-run`, Drafts append via `--draft`, and Sent-copy append after sending. Never retry an SMTP-accepted message solely because cleanup or Sent-copy append failed; expose `sent_copy.ok` separately.
+- Send/reply/reply-all/forward accept attachments from regular-file `path` or `content_base64`, with optional `filename`/`content_type`. Copy source attachments only for forward with `include_attachments:true`. Preserve count, decoded-byte, and encoded-message limits and nonblocking rejection of nonregular files.
+- Poll returns `messages`, `next_cursor`, and `has_more`. An initial poll includes existing mail unless `--start-now` is supplied. Bind cursors to account, folder, and UIDVALIDITY; detect mailbox resets, preserve snapshot paging, and never advance checkpoints on errors. Consumers save cursors after processing successful pages. Polling must not mark mail read.
+- Preserve bounded IMAP/SMTP I/O, UID/mailbox/flag validation, and valid address/header serialization. MIME decoders share one read budget; HTML limits apply before tree construction. Limit failures must be explicit errors.
 
-The config file can contain plaintext credentials only when the user explicitly runs `icloud auth save`. Prefer environment-only `auth save`; omitted credential flags use the existing environment variables. Keep environment secrets out of flag defaults and help output, and preserve atomic mode-0600 config replacement.
+## Calendar and contacts contracts
 
-Logging is environment-configured with safe defaults:
+- Credentialed DAV requests require HTTPS and allowlisted hosts, including redirects. Preserve legitimate opaque absolute resource hrefs while rejecting unsafe targets.
+- Creates must not overwrite existing resources. Full-replacement `update` requires an existing target; structured updates preserve its UID and use its ETag when available.
+- `patch` preserves omitted properties, UID, alarms, recurrence components, and custom fields. Optional JSON `null` clears a field; unknown keys and clearing required fields fail. Contact email/phone arrays replace their corresponding properties. Require verified individual-resource metadata, a strong ETag, conditional writes, and redirect-free patch GET/PUT requests.
+- Deletes require positive individual-resource metadata of the expected service and a strong ETag. Use conditional DELETE and refuse redirects, collections, or unverifiable targets.
+- All-day events use date-only start and exclusive end dates, without a timezone. Timed input supports IANA `time_zone`; embed timezone data and reject ambiguous/nonexistent local times unless a valid explicit offset resolves them. Changed timed endpoints serialize UTC; omitted endpoints remain verbatim. Mode/zone patches require both endpoints. Reject temporal patches of recurring events; metadata patches remain supported.
+- Event listing accepts `--calendar` hrefs or `--calendar-name` lookup. Contact search uses CardDAV filtering, accepts exactly one query/name/email/phone/organization criterion, and returns normalized fields.
+- Preserve DAV response, physical-line, and component-depth limits. Handle folded properties without quadratic copying.
 
-- `ICLOUD_CLI_LOG=file|stderr|off` defaults to `file`.
-- `ICLOUD_CLI_LOG_LEVEL=info|warn|error` defaults to `warn`.
-- `ICLOUD_CLI_LOG_FILE` defaults to the OS cache location under `icloud-cli/icloud.log`.
-- `ICLOUD_CLI_LOG_SIZE` defaults to `10` MB and `ICLOUD_CLI_LOG_NUM` defaults to `3`.
+## Build and validation
 
-Use `icloud log status` to inspect the effective logging configuration. Logs should be detailed operational metadata only; never log app passwords, auth headers, SMTP auth payloads, Apple ID values, message bodies, raw RFC822, vCards, iCalendar payloads, mail subjects, event summaries, or contact names.
-
-CLI output is JSON by default, and `--json` is accepted on every command as a no-op for automation consistency. Nested `--help` should return a successful JSON help envelope and exit 0 without requiring credentials or network access.
-
-Reject unexpected positional arguments before any operation. Preserve failure exit codes when writing JSON fails. Log only redacted command arguments and operational error metadata.
-
-Mail message summaries decode encoded headers by default. `icloud mail messages list` supports first-class triage filters such as `--unread`, `--since 24h`, `--from domain.com`, `--flagged`, and `--limit`; use `--raw-headers` when raw subject/from/to/date fields are needed. `icloud mail messages get` is header-only by default; use `--body text`, `--body html`, `--attachments`, or `--raw` to fetch message content. `--body text` prefers useful plain text and falls back to HTML-derived text when the plain part is missing or only a tiny stub. Use `icloud mail messages attachment get --attachment <id>` to retrieve one attachment as `content_base64`. Reply, reply-all, and forward preserve text-threading headers for replies, use `Fwd:` subject handling for forwards, support `--dry-run` metadata previews, and support `--draft` Drafts append. Actual reply/reply-all/forward sends must continue to append a Sent copy. Calendar event listing supports either `--calendar` hrefs or `--calendar-name` display-name lookup.
-
-Preserve the security boundaries documented in README.md: bounded IMAP/SMTP I/O, streaming MIME with one shared read budget, HTML limits before tree construction, explicit limit errors, and valid address/header serialization. `--since` uses calendar-day precision; Unicode plain-text search and `--from` are supported, while raw IMAP criteria must be ASCII. Do not retry a send solely because cleanup or Sent-copy append failed after SMTP acceptance.
-
-DAV creates must not overwrite existing resources. Structured updates preserve the stored UID and use its ETag when available; updates replace the complete resource. Deletes require positive individual-resource metadata of the expected service and a strong ETag, use conditional DELETE, and refuse redirects. Preserve legitimate opaque absolute resource hrefs while rejecting collections and unverifiable targets.
-
-Builds require Go 1.25 or newer; use a current patched Go release. Run tests, vet, and race checks for code changes. Keep the exact parser limits and user-visible compatibility notes in README.md synchronized with the implementation.
-
-New automation features in the working tree:
-
-- Send/reply/reply-all/forward accept `attachments` entries with `path` or `content_base64`, optional `filename`/`content_type`. Forward source files only when `include_attachments:true`. Keep preview output to metadata. Limits: 100 files, 20 MiB decoded attachments, 32 MiB encoded message.
-- `mail messages poll` returns `messages`, `next_cursor`, and `has_more`. First poll includes existing mail unless `--start-now` is supplied. Save cursors only after processing a successful page; errors must not advance them. Bind cursors to account, folder, and UIDVALIDITY; detect mailbox resets. Poll does not mark messages read.
-- Calendar/contact `patch` preserves omitted properties and uses verified strong ETags. Optional JSON `null` clears a field; unknown keys and clearing required fields fail. Existing `update` remains full replacement. Preserve recurrence/alarms/custom fields; reject temporal patches of recurring events.
-- Events support `all_day` with date-only start/exclusive end, or local wall times with IANA `time_zone`. Embed timezone data and reject ambiguous/nonexistent local times unless an explicit valid offset resolves them. Mode/zone patches require both endpoints.
-- Contact `search` supports exactly one query/name/email/phone/organization filter and returns normalized contact fields. Use CardDAV filtering, with limit 1–1,000 (default 100).
-- DAV response bodies are capped at 32 MiB; content parsing allows at most 100,000 physical lines and 32 component levels. Preserve folded properties without quadratic copying.
-
-When testing in this sandbox, keep Go's build cache inside the workspace:
+Use Go 1.25 or newer, preferably a current patched release. Run from the repository root with workspace-local caches:
 
 ```sh
-GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test ./...
-GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go vet ./...
-GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test -race ./...
+export GOCACHE="$PWD/.gocache" GOMODCACHE="$PWD/.gomodcache"
+go test ./...
+go vet ./...
+go test -race ./...
+go build -o /tmp/icloud-cli ./cmd/icloud
 ```
 
-For local binaries:
+For code changes, run tests, vet, and race checks, with focused regressions for changed behavior. Keep automated/mock results distinct from live iCloud validation.
 
-```sh
-GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go build -o /private/tmp/icloud-cli ./cmd/icloud
-```
+When running live tests, use disposable records and clean them up in the same run. For Contacts, select the `contacts books list` entry whose `resource_types` includes `addressbook`; collection roots are not writable books.
 
-When running live tests against iCloud, create disposable test records and clean them up in the same run. For Contacts, use the `contacts books list` entry whose `resource_types` includes `addressbook`; collection roots are not writable address books.
+## Releases and Homebrew
 
-Tags matching `v*` trigger GitHub Actions binary builds for Linux amd64, Linux arm64, and macOS arm64, and publish release assets with sha256 files.
-
-The Homebrew formula lives in the separate `AaronFaby/homebrew-tap` repository. Users install with `brew install AaronFaby/tap/icloud`; formula changes build from tagged source releases and should land through tap pull requests.
-
-Do not add private iCloud Drive, Notes, Reminders, Photos, or web-session scraping behavior without a new explicit product decision.
+- Tags matching `v*` trigger tests and binary builds for Linux amd64, Linux arm64, and macOS arm64, then publish archives and SHA-256 files. Verify the published notes, assets, and checksums.
+- Release notes come from the annotated tag. Preserve Markdown headings with `git tag --cleanup=verbatim` when using a notes file; verify the published body and use `gh release edit --notes-file` if needed.
+- The formula lives in `AaronFaby/homebrew-tap` and builds from tagged source. Users install with `brew install AaronFaby/tap/icloud`; formula changes should land through tap PRs.
+- The release workflow dispatches `bump-icloud.yml` using `HOMEBREW_TAP_TOKEN`. Check release publication and tap handoff separately; a dispatch failure can occur after successful publication. Verify formula validation and the resulting tap PR.
