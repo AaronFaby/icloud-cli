@@ -26,10 +26,12 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
+          GH_TOKEN="$(printf '%s' "$GH_TOKEN" | tr -d '[:space:]')"
           if [ -z "$GH_TOKEN" ]; then
             echo "HOMEBREW_TAP_TOKEN is empty"
             exit 1
           fi
+          echo "Token length ${#GH_TOKEN}, prefix ${GH_TOKEN:0:4}"
           revision="$(git rev-list -n 1 "$TAG")"
           echo "Dispatching $TAG at $revision"
           gh workflow run bump-icloud.yml \
