@@ -1,0 +1,39 @@
+name: Retry Homebrew dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to send to the Homebrew tap
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch Homebrew tap bump
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Dispatch Homebrew tap bump
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is empty"
+            exit 1
+          fi
+          revision="$(git rev-list -n 1 "$TAG")"
+          echo "Dispatching $TAG at $revision"
+          gh workflow run bump-icloud.yml \
+            --repo AaronFaby/homebrew-tap \
+            --ref main \
+            -f tag="$TAG" \
+            -f revision="$revision"
