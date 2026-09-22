@@ -24,9 +24,11 @@ Missing credentials, validation errors, unsupported services, and remote failure
 
 ## Status
 
-The current release is `v1.1.0`. It covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. Earlier functionality has been smoke-tested against iCloud using disposable records.
+The current release is `v1.1.1`. It covers Mail, Calendar, and Contacts through documented Apple-compatible protocols and app-specific passwords. Earlier functionality has been smoke-tested against iCloud using disposable records.
 
-Version 1.1.0 adds attachments, polling, partial edits, timezone/all-day events, contact search, and security hardening. These changes have automated test coverage and code/security review but have not yet had live iCloud validation. Download the tagged release assets for this version; Homebrew availability follows the separate tap update.
+Version 1.1.0 adds attachments, polling, partial edits, timezone/all-day events, contact search, and security hardening. These changes have automated test coverage and code/security review but have not yet had live iCloud validation.
+
+Version 1.1.1 corrects mail poll error reporting, rejects raw IMAP search literals, aligns CalDAV and CardDAV with the 45-second deadline, and matches Sent, Drafts, and Trash by known mailbox name. Source builds require Go 1.26 or newer. Download the tagged release assets for this version; Homebrew availability follows the separate tap update.
 
 Release builds are produced for:
 
@@ -302,7 +304,7 @@ Specify exactly one of `--query`, `--name`, `--email`, `--phone`, or `--organiza
 
 ## Testing
 
-Builds require Go 1.25 or newer. CI uses the current stable Go release and runs vet and race tests before building release binaries.
+Builds require Go 1.26 or newer. CI uses the current stable Go release and runs vet and race tests before building release binaries.
 
 Run the full test suite with workspace-local Go caches:
 

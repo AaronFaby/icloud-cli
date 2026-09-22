@@ -37,7 +37,7 @@
 
 ## Build and validation
 
-Use Go 1.25 or newer, preferably a current patched release. Run from the repository root with workspace-local caches:
+Use Go 1.26 or newer, preferably a current patched release. Run from the repository root with workspace-local caches:
 
 ```sh
 export GOCACHE="$PWD/.gocache" GOMODCACHE="$PWD/.gomodcache"

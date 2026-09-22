@@ -67,7 +67,7 @@ Logs may include command lifecycle, timings, remote status codes, resource count
 
 ## Build And Test
 
-Use Go 1.25 or newer, preferably a current patched release. In this workspace, keep Go's build cache inside the repo:
+Use Go 1.26 or newer, preferably a current patched release. In this workspace, keep Go's build cache inside the repo:
 
 ```sh
 GOCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gocache GOMODCACHE=/Users/aaronfaby/Projects/Codex/icloud-cli/.gomodcache go test ./...
