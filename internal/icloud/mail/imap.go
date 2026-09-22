@@ -278,6 +278,11 @@ func (c *IMAPClient) search(folder, criteria string, literal *string) ([]string,
 			return nil, err
 		}
 	}
+	// command() cannot complete a literal handshake. A raw {n} marker would
+	// leave the server waiting and desynchronize the session.
+	if literal == nil && containsIMAPLiteral(criteria) {
+		return nil, output.Validation("unsupported_search_literal", "raw IMAP search criteria cannot include a literal; quote the text or use a plain-text query", nil)
+	}
 	if err := c.selectFolder(folder); err != nil {
 		return nil, err
 	}
@@ -530,6 +535,9 @@ func (c *IMAPClient) command(format string, args ...any) (imapResponse, error) {
 	if err := validateIMAPLine(line); err != nil {
 		return imapResponse{}, err
 	}
+	if containsIMAPLiteral(line) {
+		return imapResponse{}, output.Validation("unsupported_imap_literal", "IMAP command cannot include a literal", nil)
+	}
 	if c.ctx != nil {
 		if err := c.ctx.Err(); err != nil {
 			return imapResponse{}, err
@@ -698,6 +706,40 @@ func validateIMAPLine(line string) error {
 		return output.Validation("invalid_imap_command", "IMAP command values cannot contain NUL, line breaks, or invalid UTF-8", nil)
 	}
 	return nil
+}
+
+// containsIMAPLiteral reports an unquoted {n} or {n+} marker. command() sends
+// one line and then reads; it never writes the octets a literal promises.
+func containsIMAPLiteral(s string) bool {
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			if inQuote && i+1 < len(s) {
+				i++
+			}
+		case '"':
+			inQuote = !inQuote
+		case '{':
+			if inQuote {
+				continue
+			}
+			j := i + 1
+			if j >= len(s) || s[j] < '0' || s[j] > '9' {
+				continue
+			}
+			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+				j++
+			}
+			if j < len(s) && s[j] == '+' {
+				j++
+			}
+			if j < len(s) && s[j] == '}' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func quoteMailbox(name string) string {
@@ -1204,11 +1246,8 @@ func chooseTrashFolder(folders []Folder, requested string) string {
 			}
 		}
 	}
-	for _, folder := range folders {
-		name := strings.ToLower(folder.Name)
-		if name == "trash" || name == "deleted messages" || strings.Contains(name, "trash") {
-			return folder.Name
-		}
+	if name, ok := matchMailboxAlias(folders, []string{"trash", "deleted messages", "deleted items"}); ok {
+		return name
 	}
 	if strings.TrimSpace(requested) != "" {
 		return requested
@@ -1227,11 +1266,8 @@ func chooseSentFolder(folders []Folder, requested string) string {
 			}
 		}
 	}
-	for _, folder := range folders {
-		name := strings.ToLower(folder.Name)
-		if name == "sent" || name == "sent messages" || strings.Contains(name, "sent") {
-			return folder.Name
-		}
+	if name, ok := matchMailboxAlias(folders, []string{"sent", "sent messages", "sent items"}); ok {
+		return name
 	}
 	return "Sent"
 }
@@ -1247,11 +1283,32 @@ func chooseDraftFolder(folders []Folder, requested string) string {
 			}
 		}
 	}
-	for _, folder := range folders {
-		name := strings.ToLower(folder.Name)
-		if name == "drafts" || name == "draft" || strings.Contains(name, "draft") {
-			return folder.Name
-		}
+	if name, ok := matchMailboxAlias(folders, []string{"drafts", "draft", "draft messages"}); ok {
+		return name
 	}
 	return "Drafts"
+}
+
+func matchMailboxAlias(folders []Folder, aliases []string) (string, bool) {
+	for _, alias := range aliases {
+		for _, folder := range folders {
+			if mailboxHasAlias(folder.Name, alias) {
+				return folder.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+func mailboxHasAlias(name, alias string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == alias {
+		return true
+	}
+	for _, sep := range []string{"/", "."} {
+		if strings.HasSuffix(name, sep+alias) {
+			return true
+		}
+	}
+	return false
 }

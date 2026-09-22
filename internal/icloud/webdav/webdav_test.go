@@ -7,9 +7,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aaronfaby/icloud-cli/internal/config"
 )
+
+func TestDAVClientTimeoutMatchesDeadline(t *testing.T) {
+	client := New(CalendarBase, config.Config{})
+	if client.HTTP.Timeout != 45*time.Second {
+		t.Fatalf("timeout = %s, want 45s", client.HTTP.Timeout)
+	}
+}
 
 func TestListCalendarsDiscoversCalendarHomeSet(t *testing.T) {
 	var paths []string

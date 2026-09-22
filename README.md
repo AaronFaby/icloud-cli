@@ -134,7 +134,7 @@ Nested command and group `--help` returns JSON and exits successfully without cr
 
 Mail message summaries decode encoded headers such as RFC 2047 subjects by default. Use `--raw-headers` with `mail messages list` to include `raw_subject`, `raw_from`, `raw_to`, and `raw_date` alongside decoded fields.
 
-`--since` uses IMAP's calendar-day precision: `--since 24h` includes messages from the resulting date, rather than enforcing an exact rolling 24-hour cutoff. Plain-text searches and the list command's `--from` filter support Unicode; raw IMAP search criteria must be ASCII.
+`--since` uses IMAP's calendar-day precision: `--since 24h` includes messages from the resulting date, rather than enforcing an exact rolling 24-hour cutoff. Plain-text searches and the list command's `--from` filter support Unicode; raw IMAP search criteria must be ASCII. Raw criteria cannot include an IMAP literal (`{n}` or `{n+}`); quote that text or use a plain-text query.
 
 `mail messages get` is header-only by default. Use `--body text` for readable text, `--body html` for decoded sanitized HTML, `--attachments` for attachment metadata, and `--raw` for the full RFC822 message. Text extraction prefers useful `text/plain` parts and falls back to HTML-derived text when the plain part is missing or only a tiny stub. Retrieve attachment bytes with `mail messages attachment get --attachment <id>`; the payload is returned as `content_base64` in the JSON envelope.
 

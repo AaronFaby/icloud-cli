@@ -1,9 +1,11 @@
 package mail
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -62,7 +64,7 @@ func (c *IMAPClient) PollMessages(account string, opts PollOptions) (PollResult,
 	}
 	resp, err := c.command("SELECT %s", quoteMailbox(folder))
 	if err != nil {
-		return result, err
+		return result, pollRemote(err, "imap_select_failed", "failed to select mail folder")
 	}
 	var validity, next uint64
 	for _, line := range resp.Lines {
@@ -100,7 +102,7 @@ func (c *IMAPClient) PollMessages(account string, opts PollOptions) (PollResult,
 		// message even when n is greater than the highest UID.
 		resp, err = c.command("UID SEARCH UID %d:%d", cursor.Next, cursor.Boundary-1)
 		if err != nil {
-			return result, err
+			return result, pollRemote(err, "imap_search_failed", "failed to search mail")
 		}
 		ids := []uint64{}
 		seen := map[uint64]bool{}
@@ -135,7 +137,7 @@ func (c *IMAPClient) PollMessages(account string, opts PollOptions) (PollResult,
 			id := strconv.FormatUint(uid, 10)
 			fetched, e := c.command("UID FETCH %s (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])", id)
 			if e != nil {
-				return PollResult{}, e
+				return PollResult{}, pollRemote(e, "imap_fetch_failed", "failed to fetch mail message")
 			}
 			selected, found := requestedFetch(fetched, id)
 			if found {
@@ -158,7 +160,7 @@ func (c *IMAPClient) PollMessages(account string, opts PollOptions) (PollResult,
 	// this page (for example following server failover).
 	final, err := c.command("SELECT %s", quoteMailbox(folder))
 	if err != nil {
-		return PollResult{}, err
+		return PollResult{}, pollRemote(err, "imap_select_failed", "failed to select mail folder")
 	}
 	finalValidity := uint64(0)
 	for _, line := range final.Lines {
@@ -174,4 +176,18 @@ func (c *IMAPClient) PollMessages(account string, opts PollOptions) (PollResult,
 	raw, _ := json.Marshal(cursor)
 	result.NextCursor = base64.RawURLEncoding.EncodeToString(raw)
 	return result, nil
+}
+
+// pollRemote maps a protocol failure to exit 4. Context cancellation and an
+// existing exit error stay as they are so validation and deadlines do not
+// look like an internal fault.
+func pollRemote(err error, code, message string) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var exit *output.ExitError
+	if errors.As(err, &exit) {
+		return err
+	}
+	return output.Remote(code, message, err.Error())
 }

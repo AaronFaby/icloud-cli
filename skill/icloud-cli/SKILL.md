@@ -137,7 +137,7 @@ Mail behavior notes:
 - `messages get` is header-only unless `--raw`, `--body text|html`, or `--attachments` is passed; `--body text` may use HTML-derived text when the plain part is missing or only a tiny stub. `messages attachment get --attachment <id>` returns one attachment as `content_base64`.
 - Delete moves to the detected `\Trash` mailbox by default; permanent delete requires `--permanent`.
 - Message summary headers are decoded by default; `messages list --raw-headers` preserves raw subject/from/to/date fields.
-- `--since` has calendar-day precision. Unicode is supported in plain-text searches and `--from`; raw IMAP criteria must be ASCII.
+- `--since` has calendar-day precision. Unicode is supported in plain-text searches and `--from`; raw IMAP criteria must be ASCII and must not include an IMAP literal (`{n}` or `{n+}`).
 - `messages get` includes parsed IMAP flags when the server returns them.
 - `--json` is accepted on every command as a no-op because JSON output is already the default.
 - Nested group/command help is offline and returns exit 0. Unexpected positional arguments are validation errors; all command arguments must use named flags.

@@ -76,6 +76,24 @@ func TestChooseDraftFolder(t *testing.T) {
 	}
 }
 
+func TestChooseSpecialFoldersIgnoreSubstringNames(t *testing.T) {
+	if got := chooseSentFolder([]Folder{{Name: "Unsent"}, {Name: "Consent"}, {Name: "Sent Messages"}}, ""); got != "Sent Messages" {
+		t.Fatalf("sent folder = %q, want Sent Messages", got)
+	}
+	if got := chooseSentFolder([]Folder{{Name: "Sentimental"}}, ""); got != "Sent" {
+		t.Fatalf("sent folder = %q, want default Sent", got)
+	}
+	if got := chooseSentFolder([]Folder{{Name: "INBOX/Sent Items"}}, ""); got != "INBOX/Sent Items" {
+		t.Fatalf("sent folder = %q, want delimited alias", got)
+	}
+	if got := chooseDraftFolder([]Folder{{Name: "Drafting Notes"}, {Name: "Draft Messages"}}, ""); got != "Draft Messages" {
+		t.Fatalf("draft folder = %q, want Draft Messages", got)
+	}
+	if got := chooseTrashFolder([]Folder{{Name: "Trashcan"}, {Name: "Deleted Items"}}, ""); got != "Deleted Items" {
+		t.Fatalf("trash folder = %q, want Deleted Items", got)
+	}
+}
+
 func TestParseFolderHandlesEscapedAndUnicodeNames(t *testing.T) {
 	tests := []struct {
 		name string
@@ -200,6 +218,71 @@ func TestBuildSearchCriteriaForListFilters(t *testing.T) {
 	}
 	if got := buildSearchCriteria(MessageListOptions{}); got != "ALL" {
 		t.Fatalf("criteria = %q, want ALL", got)
+	}
+}
+
+func TestSearchRejectsRawIMAPLiteral(t *testing.T) {
+	var client IMAPClient
+	for _, query := range []string{"TEXT {5}", "ALL {5}", "TEXT {5+}"} {
+		_, err := client.Search("INBOX", query)
+		var exit *output.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode != output.ExitValidation || exit.Err.Code != "unsupported_search_literal" {
+			t.Fatalf("Search(%q) err = %#v", query, err)
+		}
+	}
+	if containsIMAPLiteral(`TEXT "{5}"`) || containsIMAPLiteral(`SUBJECT "report \"{5}\""`) {
+		t.Fatal("quoted brace text was treated as a literal")
+	}
+}
+
+func TestSearchAllowsQuotedBraceText(t *testing.T) {
+	client, commands := newScriptedIMAPClient(t, []string{
+		`* 1 EXISTS`,
+		`A0001 OK SELECT completed`,
+		`* SEARCH`,
+		`A0001 OK SEARCH completed`,
+	})
+	defer client.conn.Close()
+	ids, err := client.Search("INBOX", `TEXT "{5}"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ids = %#v", ids)
+	}
+	assertCommands(t, commands, []string{
+		`A0001 SELECT "INBOX"`,
+		`A0002 UID SEARCH TEXT "{5}"`,
+	})
+}
+
+func TestPollCommandFailureIsRemote(t *testing.T) {
+	cases := [][]string{
+		{"A0001 NO failed"},
+		{"* OK [UIDVALIDITY 9] stable", "* OK [UIDNEXT 4] next", "A0001 OK selected", "A0001 NO failed"},
+		{"* OK [UIDVALIDITY 9] stable", "* OK [UIDNEXT 4] next", "A0001 OK selected", "* SEARCH 1", "A0001 OK search", "A0001 NO failed"},
+		{"* OK [UIDVALIDITY 9] stable", "* OK [UIDNEXT 4] next", "A0001 OK selected", "* SEARCH", "A0001 OK search", "A0001 NO failed"},
+	}
+	for _, lines := range cases {
+		client, _ := newScriptedIMAPClient(t, lines)
+		_, err := client.PollMessages("me", PollOptions{})
+		client.conn.Close()
+		var exit *output.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode != output.ExitRemote {
+			t.Fatalf("lines %#v err = %#v", lines, err)
+		}
+	}
+}
+
+func TestPollPreservesContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client, _ := newScriptedIMAPClient(t, nil)
+	defer client.conn.Close()
+	client.ctx = ctx
+	_, err := client.PollMessages("me", PollOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
