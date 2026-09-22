@@ -22,6 +22,9 @@ import (
 const (
 	CalendarBase = "https://caldav.icloud.com/"
 	ContactsBase = "https://contacts.icloud.com/"
+	// davTimeout matches the documented DAV deadline. The HTTP client timeout
+	// covers dial, redirects, and the body, so a shorter value fires first.
+	davTimeout = 45 * time.Second
 )
 
 type Resource struct {
@@ -44,7 +47,7 @@ func New(baseURL string, cfg config.Config) *Client {
 	return &Client{
 		BaseURL: baseURL,
 		Config:  cfg,
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		HTTP:    &http.Client{Timeout: davTimeout},
 	}
 }
 
